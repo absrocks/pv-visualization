@@ -1,25 +1,174 @@
-# ==== ParaView Macro: per-bin U_bar, k_avg, eps, alpha1_bar (reduced points) ====
-from paraview.simple import *
+import subprocess
 import os
+import sys
 import glob
-# ---------------- user settings ----------------
-array_U          = "U"        # 3-comp vector (required)
-array_alpha1     = "alpha.water"   # scalar (required)  -> will output alpha1_bar
-array_nuSgs      = "nut"    # scalar (required)  -> used only inside eps, not output
-span_dir         = "y"        # 'x'|'y'|'z'  (average ALONG this axis; keep the other two)
-use_cell_centers = False      # True if arrays are on Cell Data
-merge_blocks     = True       # True if case is decomposed/multiblock (recommended!)
-nu               = 1e-6       # molecular viscosity
-bin_scale        = 1.0        # >1 coarsens bins (fewer bins -> faster Delaunay)
-force_global     = True  # set True to gather to 1 rank before averaging
-# ------------------------------------------------
+import re
+import tempfile
+import logging
+from pathlib import Path
+from datetime import datetime
 
+# --- File Pattern Configuration ---
+FILE_PATTERNS = {
+    'pattern_type': 'iteration',
+    'base_directory': './',
+    'file_template': '*.foam',
+    'number_range': None,  # None for auto-detection, or [start, end, step]
+}
+
+# --- Analysis Configuration ---
+BATCH_CONFIG = {
+
+    # ==============================================================================
+    # SELECT VARIABLE
+    # ==============================================================================
+    # 'data_array': 'w',
+    'array_U': 'U',
+    'array_alpha1': 'alpha.water',
+    'array_nuSgs':  'nut',
+    'merge_blocks': 'True',  # True if case is decomposed/multiblock (recommended!)
+    'nu': 1e-6,  # molecular viscosity
+    'bin_scale': '1.0',  # >1 coarsens bins (fewer bins -> faster Delaunay)
+    'force_global': 'True',
+
+    # ==============================================================================
+    # SLICING OR AVERAGING?
+    # ==============================================================================
+    # 'analysis_mode': 'averaging',  # 'averaging' or 'slicing'
+    'analysis_mode': 'clipping',  # 'averaging' or 'slicing'
+
+    # ==============================================================================
+    # AVERAGING
+    # ==============================================================================
+    'averaging': {
+        'axis': 'Y',
+    },
+
+    # ==============================================================================
+    # SLICING
+    # ==============================================================================
+    'clipping': {
+        'axis': 'X',
+        'Xmin': 20,  # Use None for auto-center
+        'Xmax': 28,
+    },
+
+    'visualization': {
+        'image_size': [1200, 800],
+        'color_map': 'jet',
+    }
+}
+
+# --- Processing Options ---
+PROCESSING_OPTIONS = {
+    'output_directory': './batch_output/',
+    'continue_on_error': True,
+    'paraview_executable': 'pvpython',
+    'paraview_args': ['--force-offscreen-rendering'],
+    'timeout_seconds': 300,  # 5 minutes per file
+    'log_file': 'batch_processing.log'
+}
+
+
+# ==============================================================================
+# IMPLEMENTATION
+# ==============================================================================
+
+def setup_logging():
+    """Setup logging for the batch processor."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(PROCESSING_OPTIONS['log_file']),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger(__name__)
+
+
+
+def find_files():
+    """Find and sort files matching the pattern."""
+    base_dir = Path(FILE_PATTERNS['base_directory'])
+    template = FILE_PATTERNS['file_template']
+    number_range = FILE_PATTERNS.get('number_range', None)
+
+    if number_range is not None:
+        # Use specified range
+        files = []
+        start, end, step = number_range
+        current = start
+        while current <= end:
+            filename = base_dir / template.format(current)
+            if filename.exists():
+                files.append(str(filename.absolute()))
+            current += step
+        return sorted(files)
+
+    else:
+        # Auto-detect files
+        glob_pattern = template.replace('{}', '*')
+        search_path = base_dir / glob_pattern
+        matching_files = glob.glob(str(search_path))
+
+        if not matching_files:
+            return []
+
+        # Sort by extracted number
+        files_with_numbers = []
+        regex_template = re.escape(template).replace(r'\{\}', r'([+-]?(?:\d+\.?\d*|\.\d+))')
+
+        for file_path in matching_files:
+            abs_path = os.path.abspath(file_path)
+            filename = Path(file_path).name
+            match = re.match(regex_template, filename)
+
+            if match:
+                try:
+                    number_str = match.group(1)
+                    try:
+                        number = int(number_str)
+                    except ValueError:
+                        number = float(number_str)
+                    files_with_numbers.append((number, abs_path))
+                except (ValueError, IndexError):
+                    continue
+
+        files_with_numbers.sort(key=lambda x: x[0])
+        return [file_path for _, file_path in files_with_numbers]
+
+
+def generate_output_filename(input_file):
+    """Generate output filename for the processed image."""
+
+    # Format number for consistent sorting
+
+    mode = 'avg' if BATCH_CONFIG['analysis_mode'] == 'averaging' else 'slice'
+    axis = (BATCH_CONFIG['averaging']['axis'] if BATCH_CONFIG['analysis_mode'] == 'averaging'
+            else BATCH_CONFIG['slicing']['axis'])
+
+    filename = f"{BATCH_CONFIG['data_array']}_{mode}_{axis}_{number_str}.png"
+    output_dir = Path(PROCESSING_OPTIONS['output_directory'])
+    return str(output_dir / filename)
 
 files = sorted(glob.glob("/project/smarras/am2455/wave_beach_profile/wang_kraus_scaled/pv_clip/slope_26.vtm"))
 
 if not files:
     raise RuntimeError("No slope_*.vtm files found!")
 
+
+def generate_processing_script(input_file, output_file):
+    """Generate a standalone script to process a single file."""
+
+    # Convert paths to absolute to avoid issues
+    input_abs = os.path.abspath(input_file)
+    output_abs = os.path.abspath(output_file)
+
+    script_content = f"""#!/usr/bin/env python3
+import os
+import sys
+from paraview.simple import *
 src = XMLMultiBlockDataReader(FileName=files)
 src.UpdatePipeline()
 cur = src
