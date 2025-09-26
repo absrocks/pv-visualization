@@ -213,11 +213,12 @@ SCRIPT1 = (
     'import builtins, numpy as np\n'
     'from vtkmodules.util import numpy_support as ns\n'
     'import vtk\n'
-    f'array_U      = "{array_U}"\n'
-    f'array_alpha1 = "{array_alpha1}"\n'
-    f'array_nuSgs  = "{array_nuSgs}"\n'
-    f'span_dir     = "{span_dir}".lower()\n'
-    f'bin_scale    = {bin_scale}\n'
+    f'array_U      = "{BATCH_CONFIG["array_U"]}"\n'
+    f'array_alpha1 = "{BATCH_CONFIG["array_alpha1"]}"\n'
+    f'array_nuSgs  = "{BATCH_CONFIG["array_nuSgs"]}"\n'
+    f'span_dir     = "{BATCH_CONFIG["averaging"]["axis"]}".lower()\n'
+    f'bin_scale    = {BATCH_CONFIG["bin_scale"]}\n'
+    f'nu           = {BATCH_CONFIG["nu"]}\n'
 )
 
 SCRIPT1 += r"""
