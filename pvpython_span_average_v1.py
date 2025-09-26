@@ -2,7 +2,7 @@
 import os, sys
 from pathlib import Path
 import numpy as np
-from paraview.simple import *
+
 
 # -------------------------------
 # Configurations
@@ -76,6 +76,37 @@ for i, axis_name in enumerate(['X', 'Y', 'Z']):
             cur = clip
             print(f"Applied {key} = {bound}")
 
+def robust_tolerance(vals):
+    arr = np.asarray(vals, dtype=float).ravel()
+    if arr.size < 3: return 1e-9
+    v = np.unique(np.sort(arr))
+    if v.size < 3: return 1e-9
+    d = np.diff(v)
+    h = np.percentile(d, 10)
+    if not np.isfinite(h) or h <= 0:
+        med = np.median(d); h = med if (np.isfinite(med) and med > 0) else 1e-9
+    return builtins.max(h*0.5, 1e-9)
+
+def ensure_NxC(A, N_expected):
+    A = np.asarray(A)
+    if A.ndim == 1:
+        A = A.reshape((-1,1))
+    elif A.ndim == 2 and A.shape[0] != N_expected and A.shape[1] == N_expected:
+        A = A.T
+    if A.shape[0] != N_expected:
+        raise RuntimeError("Array length mismatch: expected N=%d, got %s" % (N_expected, A.shape))
+    return A
+
+def bin_keys(pts, span_dir, bin_scale=1.0):
+    ax = {"x":0,"y":1,"z":2}[span_dir]
+    keep = [i for i in (0,1,2) if i != ax]
+    k1, k2 = keep
+    tol1 = robust_tolerance(pts[:,k1]) * float(bin_scale)
+    tol2 = robust_tolerance(pts[:,k2]) * float(bin_scale)
+    o1 = float(np.min(pts[:,k1])); o2 = float(np.min(pts[:,k2]))
+    i1 = np.rint((pts[:,k1]-o1)/tol1).astype(np.int64)
+    i2 = np.rint((pts[:,k2]-o2)/tol2).astype(np.int64)
+    return (ax, k1, k2, i1, i2)
 # -------------------------------
 # Shared header for PF scripts
 # -------------------------------
@@ -102,11 +133,24 @@ pts_vtk = inp.GetPoints()
 if pts_vtk is None: raise RuntimeError("No points on input.")
 pts = ns.vtk_to_numpy(pts_vtk.GetData()); N = pts.shape[0]
 pd = inp.GetPointData()
-U     = pd.GetArray(array_U)
-U     = ns.vtk_to_numpy(U).reshape((N,3))
+U     = ensure_NxC(ns.vtk_to_numpy(U),     N)
+
+# Build U_bar per bin, then U' per point
+ax,k1,k2,i1,i2 = bin_keys(pts, span_dir, bin_scale=bin_scale)
+sums={}; cnts={}
+for n in range(N):
+    key=(int(i1[n]),int(i2[n]))
+    if key not in sums: sums[key]=U[n].astype(float).copy(); cnts[key]=1
+    else: sums[key]+=U[n]; cnts[key]+=1
+Ubar_bin = {k: (sums[k]/cnts[k]) for k in sums}
+
+Uprime = np.zeros_like(U)
+for n in range(N):
+    key=(int(i1[n]),int(i2[n]))
+    Uprime[n,:] = U[n,:] - Ubar_bin[key]
+    
 out = self.GetOutput()
 out.ShallowCopy(inp)
-Uprime = U - U.mean(axis=0)
 Up_vtk   = ns.numpy_to_vtk(Uprime, deep=1); Up_vtk.SetName(array_U + "_prime")
 out.GetPointData().AddArray(Up_vtk)
 """
@@ -171,6 +215,11 @@ nusgs = pd.GetArray(array_nuSgs)
 out = self.GetOutput()
 out.ShallowCopy(inp)
 Grad   = ns.vtk_to_numpy(pd.GetArray("GradUprime")).reshape((N,9)) 
+
+if U.shape[1] != 3 or Grad.shape[1] != 9:
+    raise RuntimeError("Unexpected component counts: U:%s Grad:%s" % (U.shape, Grad.shape))
+
+k_avg = 0.5 *( Uprime[:,0]**2
 """
 RenameSource("Bins", pf_bins)
 
