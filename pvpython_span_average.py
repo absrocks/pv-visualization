@@ -221,7 +221,7 @@ SCRIPT1 = (
     f'nu           = {BATCH_CONFIG["nu"]}\n'
 )
 
-SCRIPT1 += r"""
+SCRIPT1 += '''
 def robust_tolerance(vals):
     arr = np.asarray(vals, dtype=float).ravel()
     if arr.size < 3: return 1e-9
@@ -292,7 +292,7 @@ out.ShallowCopy(inp)
 Up_vtk   = ns.numpy_to_vtk(Uprime, deep=1); Up_vtk.SetName(array_U + "_prime")
 out.GetPointData().AddArray(Up_vtk)
 # alpha and nuSgs already on the data; no need to duplicate
-"""
+'''
 #ghostCells1 = GhostCells(registrationName='GhostCells1', Input=slope_0vtm)
 #ghostCells1.BuildIfRequired = 1
 if force_global:
@@ -356,7 +356,7 @@ SCRIPT2 = (
     f'nu           = {nu}\n'
 )
 
-SCRIPT2 += r"""
+SCRIPT2 += '''
 def robust_tolerance(vals):
     arr = np.asarray(vals, dtype=float).ravel()
     if arr.size < 3: return 1e-9
@@ -483,7 +483,7 @@ outPD.GetPointData().AddArray(eps_vtk)
 outPD.GetPointData().AddArray(a1_vtk)
 self.GetOutput().ShallowCopy(outPD)
 print("[bins] M =", M, "-> arrays: U_bar, k_avg, eps, alpha1_bar")
-"""
+'''
 
 pf_bins.Script = SCRIPT2
 RenameSource("Ubar_k_eps_alpha_bins_PF", pf_bins)
