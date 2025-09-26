@@ -6,6 +6,7 @@ import re
 import tempfile
 import logging
 from pathlib import Path
+import numpy as np
 from datetime import datetime
 
 # --- File Pattern Configuration ---
@@ -156,7 +157,37 @@ files = sorted(glob.glob("/project/smarras/am2455/wave_beach_profile/wang_kraus_
 
 if not files:
     raise RuntimeError("No slope_*.vtm files found!")
+def robust_tolerance(vals):
+    arr = np.asarray(vals, dtype=float).ravel()
+    if arr.size < 3: return 1e-9
+    v = np.unique(np.sort(arr))
+    if v.size < 3: return 1e-9
+    d = np.diff(v)
+    h = np.percentile(d, 10)
+    if not np.isfinite(h) or h <= 0:
+        med = np.median(d); h = med if (np.isfinite(med) and med > 0) else 1e-9
+    return builtins.max(h*0.5, 1e-9)
 
+def ensure_NxC(A, N_expected):
+    A = np.asarray(A)
+    if A.ndim == 1:
+        A = A.reshape((-1,1))
+    elif A.ndim == 2 and A.shape[0] != N_expected and A.shape[1] == N_expected:
+        A = A.T
+    if A.shape[0] != N_expected:
+        raise RuntimeError("Array length mismatch: expected N=%d, got %s" % (N_expected, A.shape))
+    return A
+
+def bin_keys(pts, span_dir, bin_scale=1.0):
+    ax = {"x":0,"y":1,"z":2}[span_dir]
+    keep = [i for i in (0,1,2) if i != ax]
+    k1, k2 = keep
+    tol1 = robust_tolerance(pts[:,k1]) * float(bin_scale)
+    tol2 = robust_tolerance(pts[:,k2]) * float(bin_scale)
+    o1 = float(np.min(pts[:,k1])); o2 = float(np.min(pts[:,k2]))
+    i1 = np.rint((pts[:,k1]-o1)/tol1).astype(np.int64)
+    i2 = np.rint((pts[:,k2]-o2)/tol2).astype(np.int64)
+    return (ax, k1, k2, i1, i2)
 
 def generate_processing_script(input_file, output_file):
     """Generate a standalone script to process a single file."""
@@ -222,37 +253,7 @@ SCRIPT1 = (
 )
 
 SCRIPT1 += '''
-def robust_tolerance(vals):
-    arr = np.asarray(vals, dtype=float).ravel()
-    if arr.size < 3: return 1e-9
-    v = np.unique(np.sort(arr))
-    if v.size < 3: return 1e-9
-    d = np.diff(v)
-    h = np.percentile(d, 10)
-    if not np.isfinite(h) or h <= 0:
-        med = np.median(d); h = med if (np.isfinite(med) and med > 0) else 1e-9
-    return builtins.max(h*0.5, 1e-9)
 
-def ensure_NxC(A, N_expected):
-    A = np.asarray(A)
-    if A.ndim == 1:
-        A = A.reshape((-1,1))
-    elif A.ndim == 2 and A.shape[0] != N_expected and A.shape[1] == N_expected:
-        A = A.T
-    if A.shape[0] != N_expected:
-        raise RuntimeError("Array length mismatch: expected N=%d, got %s" % (N_expected, A.shape))
-    return A
-
-def bin_keys(pts, span_dir, bin_scale=1.0):
-    ax = {"x":0,"y":1,"z":2}[span_dir]
-    keep = [i for i in (0,1,2) if i != ax]
-    k1, k2 = keep
-    tol1 = robust_tolerance(pts[:,k1]) * float(bin_scale)
-    tol2 = robust_tolerance(pts[:,k2]) * float(bin_scale)
-    o1 = float(np.min(pts[:,k1])); o2 = float(np.min(pts[:,k2]))
-    i1 = np.rint((pts[:,k1]-o1)/tol1).astype(np.int64)
-    i2 = np.rint((pts[:,k2]-o2)/tol2).astype(np.int64)
-    return (ax, k1, k2, i1, i2)
 
 inp = self.GetInput()
 pts_vtk = inp.GetPoints()
@@ -293,8 +294,7 @@ Up_vtk   = ns.numpy_to_vtk(Uprime, deep=1); Up_vtk.SetName(array_U + "_prime")
 out.GetPointData().AddArray(Up_vtk)
 # alpha and nuSgs already on the data; no need to duplicate
 '''
-#ghostCells1 = GhostCells(registrationName='GhostCells1', Input=slope_0vtm)
-#ghostCells1.BuildIfRequired = 1
+
 if force_global:
     try:
         ghost = GhostCells(Input=pf_prepare)
@@ -357,37 +357,6 @@ SCRIPT2 = (
 )
 
 SCRIPT2 += '''
-def robust_tolerance(vals):
-    arr = np.asarray(vals, dtype=float).ravel()
-    if arr.size < 3: return 1e-9
-    v = np.unique(np.sort(arr))
-    if v.size < 3: return 1e-9
-    d = np.diff(v)
-    h = np.percentile(d, 10)
-    if not np.isfinite(h) or h <= 0:
-        med = np.median(d); h = med if (np.isfinite(med) and med > 0) else 1e-9
-    return builtins.max(h*0.5, 1e-9)
-
-def ensure_NxC(A, N_expected):
-    A = np.asarray(A)
-    if A.ndim == 1:
-        A = A.reshape((-1,1))
-    elif A.ndim == 2 and A.shape[0] != N_expected and A.shape[1] == N_expected:
-        A = A.T
-    if A.shape[0] != N_expected:
-        raise RuntimeError("Array length mismatch: expected N=%d, got %s" % (N_expected, A.shape))
-    return A
-
-def bin_keys(pts, span_dir, bin_scale=1.0):
-    ax = {"x":0,"y":1,"z":2}[span_dir]
-    keep = [i for i in (0,1,2) if i != ax]
-    k1, k2 = keep
-    tol1 = robust_tolerance(pts[:,k1]) * float(bin_scale)
-    tol2 = robust_tolerance(pts[:,k2]) * float(bin_scale)
-    o1 = float(np.min(pts[:,k1])); o2 = float(np.min(pts[:,k2]))
-    i1 = np.rint((pts[:,k1]-o1)/tol1).astype(np.int64)
-    i2 = np.rint((pts[:,k2]-o2)/tol2).astype(np.int64)
-    return (ax, k1, k2, i1, i2)
 
 def tensor_from_vtk9(T):
     # [Gxx,Gxy,Gxz, Gyx,Gyy,Gyz, Gzx,Gzy,Gzz]
