@@ -13,49 +13,26 @@ from datetime import datetime
 FILE_PATTERNS = {
     'pattern_type': 'iteration',
     'base_directory': './',
-    'file_template': '*.foam',
+    'file_template': '*.vtm',
     'number_range': None,  # None for auto-detection, or [start, end, step]
 }
 
 # --- Analysis Configuration ---
 BATCH_CONFIG = {
-
-    # ==============================================================================
-    # SELECT VARIABLE
-    # ==============================================================================
-    # 'data_array': 'w',
     'array_U': 'U',
     'array_alpha1': 'alpha.water',
-    'array_nuSgs':  'nut',
-    'merge_blocks': 'True',  # True if case is decomposed/multiblock (recommended!)
-    'nu': 1e-6,  # molecular viscosity
-    'bin_scale': '1.0',  # >1 coarsens bins (fewer bins -> faster Delaunay)
-    'force_global': 'True',
-
-    # ==============================================================================
-    # SLICING OR AVERAGING?
-    # ==============================================================================
-    # 'analysis_mode': 'averaging',  # 'averaging' or 'slicing'
-    'analysis_mode': 'clipping',  # 'averaging' or 'slicing'
-
-    # ==============================================================================
-    # AVERAGING
-    # ==============================================================================
-    'averaging': {
-        'axis': 'Y',
-    },
-
-    # ==============================================================================
-    # SLICING
-    # ==============================================================================
-    'clipping': {
-        'axis': 'X',
-        'Xmin': 20,  # Use None for auto-center
-        'Xmax': 28,
-    },
-
+    'array_nuSgs': 'nut',
+    'merge_blocks': True,
+    'nu': 1e-6,
+    'bin_scale': 1.0,
+    'force_global': True,
+    'analysis_mode': 'clipping',   # or 'averaging'
+    'averaging': {'axis': 'Y'},
+    'clipping': {'axis': 'X', 'Xmin': 20, 'Xmax': 28},
+    'output_parameter': {'array': 'k'},
+    # Visualization
     'visualization': {
-        'image_size': [1200, 800],
+        'image_size': [1920, 1080],
         'color_map': 'jet',
     }
 }
@@ -140,23 +117,21 @@ def find_files():
         return [file_path for _, file_path in files_with_numbers]
 
 
-def generate_output_filename(input_file):
+def generate_output_filename(input_file, t):
     """Generate output filename for the processed image."""
 
     # Format number for consistent sorting
 
-    mode = 'avg' if BATCH_CONFIG['analysis_mode'] == 'averaging' else 'slice'
-    axis = (BATCH_CONFIG['averaging']['axis'] if BATCH_CONFIG['analysis_mode'] == 'averaging'
-            else BATCH_CONFIG['slicing']['axis'])
+    axis = (BATCH_CONFIG['averaging']['axis'])
 
-    filename = f"{BATCH_CONFIG['data_array']}_{mode}_{axis}_{number_str}.png"
-    output_dir = Path(PROCESSING_OPTIONS['output_directory'])
+    filename = f"{BATCH_CONFIG['output_parameter']['array']}_{axis}_t{t}.png"
+    output_dir = Path(PROCESSING_OPTIONS['output_directory'], BATCH_CONFIG['output_parameter']['array'])
     return str(output_dir / filename)
 
-files = sorted(glob.glob("/project/smarras/am2455/wave_beach_profile/wang_kraus_scaled/pv_clip/slope_26.vtm"))
+#files = sorted(glob.glob("/project/smarras/am2455/wave_beach_profile/wang_kraus_scaled/pv_clip/slope_26.vtm"))
 
-if not files:
-    raise RuntimeError("No slope_*.vtm files found!")
+#if not files:
+#    raise RuntimeError("No slope_*.vtm files found!")
 def robust_tolerance(vals):
     arr = np.asarray(vals, dtype=float).ravel()
     if arr.size < 3: return 1e-9
@@ -200,16 +175,21 @@ def generate_processing_script(input_file, output_file):
 import os
 import sys
 from paraview.simple import *
-src = XMLMultiBlockDataReader(FileName=files)
+src = XMLPartitionedStructuredGridReader(FileName=files)
 src.UpdatePipeline()
+data_info = src.GetDataInformation()
+        if data_info.GetNumberOfPoints() == 0:
+            print("ERROR: No data points found")
+            return False
 cur = src
-if merge_blocks:
+#merge_blocks
+if BATCH_CONFIG['merge_blocks']:
     try:
         cur = MergeBlocks(Input=cur); cur.UpdatePipeline()
     except Exception:
         pass
 
-if force_global:
+if BATCH_CONFIG['force_global']:
     d3 = RedistributeDataSet(Input=cur)
     # try all known property names across ParaView versions
     set_ok = False
@@ -236,23 +216,17 @@ if use_cell_centers:
     cc = CellCenters(Input=cur); cc.VertexCells = 0; cc.UpdatePipeline()
     cur = cc
 
+# Get available arrays
+        point_arrays = [reader.GetPointDataInformation().GetArray(i).Name
+                       for i in range(reader.GetPointDataInformation().GetNumberOfArrays())]
+        print(f"Available arrays: {{', '.join(point_arrays)}}")
+
 # ---------- PF #1: compute U' (keep topology), pass through required arrays ----------
+U = "{BATCH_CONFIG['array_U']}"
 pf_prepare = ProgrammableFilter(Input=cur)
 
 
-SCRIPT1 = (
-    'import builtins, numpy as np\n'
-    'from vtkmodules.util import numpy_support as ns\n'
-    'import vtk\n'
-    f'array_U      = "{BATCH_CONFIG["array_U"]}"\n'
-    f'array_alpha1 = "{BATCH_CONFIG["array_alpha1"]}"\n'
-    f'array_nuSgs  = "{BATCH_CONFIG["array_nuSgs"]}"\n'
-    f'span_dir     = "{BATCH_CONFIG["averaging"]["axis"]}".lower()\n'
-    f'bin_scale    = {BATCH_CONFIG["bin_scale"]}\n'
-    f'nu           = {BATCH_CONFIG["nu"]}\n'
-)
-
-SCRIPT1 += '''
+SCRIPT1 = '''
 
 
 inp = self.GetInput()
