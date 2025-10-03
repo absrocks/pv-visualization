@@ -323,6 +323,69 @@ def _safe_time_str(t):
     s = str(t)
     return s.replace(" ", "_").replace(":", "_").replace("/", "_").replace("\\", "_")
 
+def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
+    """
+    Always apply IsoVolume using an available scalar (default: 'alpha.water').
+    - Validates presence in PointData or CellData (as loaded by the reader).
+    - Sets InputScalars association accordingly.
+    - Uses a default ThresholdRange if none provided.
+    Returns: IsoVolume output.
+    """
+    # Defaults (edit here if you want different behavior)
+    field = array_name if isinstance(array_name, str) and array_name else 'alpha.water'
+    rng = threshold_range if (isinstance(threshold_range, (list, tuple)) and len(threshold_range) == 2) else [0.5, 2.0]
+
+    # Check availability on current source (no need to flatten just to list names)
+    pnames, cnames = list_point_cell_arrays(src)
+    if field in pnames:
+        assoc = 'POINTS'
+    elif field in cnames:
+        assoc = 'CELLS'
+    else:
+        raise RuntimeError(
+            f"IsoVolume field '{field}' not found on input. "
+            f"Make sure it is included in 'openfoam.point_arrays' or 'openfoam.cell_arrays'. "
+            f"Point arrays: {pnames}; Cell arrays: {cnames}"
+        )
+
+    r0, r1 = float(rng[0]), float(rng[1])
+    if not (r1 >= r0):
+        raise RuntimeError(f"IsoVolume range must have max >= min (got {rng}).")
+
+    iso = IsoVolume(Input=src)
+    iso.InputScalars = [assoc, field]
+    iso.ThresholdRange = [r0, r1]
+    iso.UpdatePipeline()
+
+    print(f"[pvpython-child] Applied IsoVolume on {assoc}:{field} in [{r0}, {r1}]")
+    return iso
+
+def set_axis(src, cfg):
+    view = GetActiveViewOrCreate('RenderView')
+    #disp  = CreateView(src, view)                   # src is your pipeline object
+    #disp.DataAxesGrid = 'GridAxesRepresentation'
+    view.AxesGrid.Visibility = 1
+    
+    clip_cfg = (cfg.get('clipping') or {})
+    axis = (clip_cfg.get('axis') or 'X').upper()
+    min_key = f"{axis}min"
+    max_key = f"{axis}max"
+    amin = float(clip_cfg[min_key])
+    amax = float(clip_cfg[max_key])
+    xlim = np.linspace(amin, amax, 5)
+    print("xlim", xlim.tolist())
+    # For view axes:
+    view.AxesGrid.XTitle = 'X (m)'
+    view.AxesGrid.YTitle = 'Y'
+    view.AxesGrid.ZTitle = 'Z (m)'
+    
+    # For data axes:
+    #view.AxesGrid.XAxisLabels = xlim
+    
+    view.Update()
+    
+    return src, cfg
+    
 def apply_spanwise_average(src, axis_letter='Y', array_name='U'):
     """
     Generic spanwise averaging for scalar or vector arrays.
@@ -443,7 +506,7 @@ def color_by_array_and_save_pngs(src, cfg, desired_array=None):
         raise RuntimeError(f"Invalid visualization.image_size: {img_size}. Expected [width, height].")
     img_res = (w, h)
 
-    cmap     = vis.get("color_map") or "jet"
+    cmap     = vis.get("color_map") or "Jet"
     array    = desired_array if desired_array is not None else vis.get("array")
     rng      = vis.get("range")         # None or [min, max]
     show_bar = bool(vis.get("show_scalar_bar", False))
@@ -458,6 +521,25 @@ def color_by_array_and_save_pngs(src, cfg, desired_array=None):
         raise RuntimeError("Visualization 'array' must be a string (e.g., 'U', 'p', 'U_avg', 'U_prime').")
 
     view = GetActiveViewOrCreate('RenderView')
+    
+    # Set Axis
+    view.AxesGrid.Visibility = 1
+    clip_cfg = (cfg.get('clipping') or {})
+    axis = (clip_cfg.get('axis') or 'X').upper()
+    min_key = f"{axis}min"
+    max_key = f"{axis}max"
+    amin = float(clip_cfg[min_key])
+    amax = float(clip_cfg[max_key])
+    xlim = np.linspace(amin, amax, 5)
+    print("xlim", xlim.tolist())
+    # For view axes:
+    view.AxesGrid.XTitle = 'X (m)'
+    view.AxesGrid.YTitle = 'Y'
+    view.AxesGrid.ZTitle = 'Z (m)'
+    
+    # For data axes:
+    view.AxesGrid.XAxisLabels = xlim.tolist()
+    
     if bg and isinstance(bg, (list, tuple)) and len(bg) == 3:
         view.Background = bg
     view.ViewSize = [w, h]  # must be ints
@@ -541,6 +623,15 @@ def main():
     
     src = apply_clipping_if_requested(src, cfg)
     
+    # create a new 'Extract Surface'
+    extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=src)
+    extractShow = Show(extractSurface1)
+    extractShow.Representation = 'Outline'
+    extractShow.UpdatePipeline()
+    
+    # Apply IsoVolume
+    src = apply_isovolume(src, cfg)
+    
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
 
@@ -591,7 +682,9 @@ def main():
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
         return 6
-
+    
+    #src = set_axis(src, cfg)
+    
     # ---- Render & save ----
     try:
         color_by_array_and_save_pngs(src, cfg, desired_array=effective_vis_array)
