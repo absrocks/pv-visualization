@@ -262,9 +262,9 @@ def apply_clipping_if_requested(src, cfg):
     clip1.UpdatePipeline()
 
     print(f"[pvpython-child] Applied Box clip on {axis} in [{amin}, {amax}]")
-    return clip1
+    return clip1, zmin, zmax
 
-def set_camera_plane(view, src, plane="XZ", dist_factor=1.5):
+def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
     """
     Orient camera to show a principal plane.
     'XZ' -> look along +Y, Z is up (XZ plane visible)
@@ -282,7 +282,15 @@ def set_camera_plane(view, src, plane="XZ", dist_factor=1.5):
     ry = (b[3] - b[2])
     rz = (b[5] - b[4])
     R = dist_factor * _bi.max(rx, ry, rz, 1e-6)
-
+    
+    xlim = np.linspace(b[0], b[1], 5)
+    zlim = np.linspace(zmin, zmax, 5)
+    
+    # For view axes:
+    view.AxesGrid.XTitle = 'X (m)'
+    view.AxesGrid.YTitle = 'Y (m)'
+    view.AxesGrid.ZTitle = 'Z (m)  '
+    
     plane = (plane or "XZ").upper()
     if plane == "XY":
         # look along +Z
@@ -296,9 +304,23 @@ def set_camera_plane(view, src, plane="XZ", dist_factor=1.5):
         view.CameraViewUp = [0, 0, 1]
     else:
         # XZ (default) -> look along +Y
-        view.CameraPosition = [cx, cy + R, cz]
+        view.CameraPosition = [cx, -cy - R, cz]
         view.CameraFocalPoint = [cx, cy, cz]
+        view.CenterOfRotation = [cx, cy, cz]
+        
         view.CameraViewUp = [0, 0, 1]
+        view.CameraFocalDisk = 1.0
+        view.CameraParallelProjection = 1
+        # Set Axis
+        view.AxesGrid.Visibility = 1
+        view.AxesGrid.AxesToLabel = 5
+        
+        # For data axes:
+        view.AxesGrid.XAxisUseCustomLabels = 1
+        view.AxesGrid.XAxisLabels = xlim.tolist()
+        
+        view.AxesGrid.ZAxisUseCustomLabels = 1
+        view.AxesGrid.ZAxisLabels = zlim.tolist()
 
     try:
         view.ResetCamera(False)  # keep our orientation, just fit
@@ -359,32 +381,6 @@ def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
 
     print(f"[pvpython-child] Applied IsoVolume on {assoc}:{field} in [{r0}, {r1}]")
     return iso
-
-def set_axis(src, cfg):
-    view = GetActiveViewOrCreate('RenderView')
-    #disp  = CreateView(src, view)                   # src is your pipeline object
-    #disp.DataAxesGrid = 'GridAxesRepresentation'
-    view.AxesGrid.Visibility = 1
-    
-    clip_cfg = (cfg.get('clipping') or {})
-    axis = (clip_cfg.get('axis') or 'X').upper()
-    min_key = f"{axis}min"
-    max_key = f"{axis}max"
-    amin = float(clip_cfg[min_key])
-    amax = float(clip_cfg[max_key])
-    xlim = np.linspace(amin, amax, 5)
-    print("xlim", xlim.tolist())
-    # For view axes:
-    view.AxesGrid.XTitle = 'X (m)'
-    view.AxesGrid.YTitle = 'Y'
-    view.AxesGrid.ZTitle = 'Z (m)'
-    
-    # For data axes:
-    #view.AxesGrid.XAxisLabels = xlim
-    
-    view.Update()
-    
-    return src, cfg
     
 def apply_spanwise_average(src, axis_letter='Y', array_name='U'):
     """
@@ -495,7 +491,7 @@ out.GetPointData().AddArray(avg_vtk)
     return pf, avg_name
 
 
-def color_by_array_and_save_pngs(src, cfg, desired_array=None):
+def color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=None):
     vis = cfg.get("visualization", {}) or {}
     img_size = vis.get("image_size") or [1200, 800]
     # Ensure exactly two ints
@@ -522,23 +518,6 @@ def color_by_array_and_save_pngs(src, cfg, desired_array=None):
 
     view = GetActiveViewOrCreate('RenderView')
     
-    # Set Axis
-    view.AxesGrid.Visibility = 1
-    clip_cfg = (cfg.get('clipping') or {})
-    axis = (clip_cfg.get('axis') or 'X').upper()
-    min_key = f"{axis}min"
-    max_key = f"{axis}max"
-    amin = float(clip_cfg[min_key])
-    amax = float(clip_cfg[max_key])
-    xlim = np.linspace(amin, amax, 5)
-    print("xlim", xlim.tolist())
-    # For view axes:
-    view.AxesGrid.XTitle = 'X (m)'
-    view.AxesGrid.YTitle = 'Y'
-    view.AxesGrid.ZTitle = 'Z (m)'
-    
-    # For data axes:
-    view.AxesGrid.XAxisLabels = xlim.tolist()
     
     if bg and isinstance(bg, (list, tuple)) and len(bg) == 3:
         view.Background = bg
@@ -549,7 +528,7 @@ def color_by_array_and_save_pngs(src, cfg, desired_array=None):
     
     # Set camera plane from config (default XZ)
     cam_plane = (cfg.get("visualization", {}) or {}).get("camera_plane", "XZ")
-    set_camera_plane(view, src, plane=cam_plane)
+    set_camera_plane(view, src, zmin, zmax, plane=cam_plane)
     
     # Resolve special names with axis suffixes if needed
     averaging = (cfg.get("averaging") or {})
@@ -621,7 +600,7 @@ def main():
         # Load dataset
     src = pick_reader(fname, cfg)
     
-    src = apply_clipping_if_requested(src, cfg)
+    src, zmin, zmax = apply_clipping_if_requested(src, cfg)
     
     # create a new 'Extract Surface'
     extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=src)
@@ -683,11 +662,11 @@ def main():
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
         return 6
     
-    #src = set_axis(src, cfg)
+    
     
     # ---- Render & save ----
     try:
-        color_by_array_and_save_pngs(src, cfg, desired_array=effective_vis_array)
+        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
