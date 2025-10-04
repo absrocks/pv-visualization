@@ -48,7 +48,7 @@ INPUT_PARAMETERS = {
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'U_avg',                       # REQUIRED: array to visualize
+        'array': 'U_prime',                       # REQUIRED: array to visualize
         'range': [0, 1],                      # e.g., [0.0, 5.0]; None = auto
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
@@ -326,6 +326,7 @@ def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
         view.ResetCamera(False)  # keep our orientation, just fit
     except Exception:
         pass
+    
 
 def _apply_preset_safe(lut, preset):
     tried = [preset, preset.title(), preset.upper(), preset.capitalize()]
@@ -490,6 +491,169 @@ out.GetPointData().AddArray(avg_vtk)
     avg_name = f"{array_name}_avg_{axis_letter.upper()}"
     return pf, avg_name
 
+def add_fluctuation(src, base_array, avg_array, out_name):
+    """
+    Create fluctuation array: out_name = base_array - avg_array (component-wise).
+    Works on PointData; assumes both arrays already exist there (your pipeline flattens first).
+    """
+    PF = """
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+import numpy as np
+
+inp = self.GetInputDataObject(0, 0)
+wrap = dsa.WrapDataObject(inp)
+pd = wrap.PointData
+
+a = "__A__"
+b = "__B__"
+if a not in pd.keys():
+    raise RuntimeError("Base array '%s' not found in PointData." % a)
+if b not in pd.keys():
+    raise RuntimeError("Avg array '%s' not found in PointData." % b)
+
+A = np.asarray(pd[a])
+B = np.asarray(pd[b])
+if A.ndim == 1: A = A.reshape(-1,1)
+if B.ndim == 1: B = B.reshape(-1,1)
+if A.shape != B.shape:
+    raise RuntimeError("Shape mismatch: %s vs %s" % (A.shape, B.shape))
+
+P = A - B
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+Pv = ns.numpy_to_vtk(P.copy(), deep=1)
+Pv.SetName("__OUT__")
+out.GetPointData().AddArray(Pv)
+""".lstrip()
+
+    code = (
+        PF.replace("__A__", base_array)
+          .replace("__B__", avg_array)
+          .replace("__OUT__", out_name)
+    )
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = code
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+    return pf
+
+def apply_gradient(src, array_name, assoc=None, opts=None):
+    """
+    Compute gradients of a scalar or vector array.
+    - array_name: name of the array (string)
+    - assoc: 'POINTS' or 'CELLS' (auto-detected if None)
+    - opts: dict of extra flags, e.g. {
+        'result_name': 'grad_field',
+        'compute_vorticity': True,
+        'vorticity_name': 'vort_field',
+        'compute_divergence': False,
+        'divergence_name': 'div_field',
+        'compute_qcriterion': False,
+        'qcriterion_name': 'Q_field',
+      }
+    Returns: (grad_filter_output, result_array_name)
+    """
+    if not isinstance(array_name, str) or not array_name:
+        raise RuntimeError("apply_gradient: 'array_name' must be a non-empty string.")
+
+    opts = opts or {}
+    result_name = opts.get('result_name', f"grad_{array_name}")
+
+    # Auto-detect association if not provided
+    if assoc is None:
+        pnames, cnames = list_point_cell_arrays(src)
+        if array_name in pnames:
+            assoc = 'POINTS'
+        elif array_name in cnames:
+            assoc = 'CELLS'
+        else:
+            raise RuntimeError(
+                f"apply_gradient: array '{array_name}' not found. "
+                f"Point arrays: {pnames}; Cell arrays: {cnames}"
+            )
+    else:
+        assoc = assoc.upper()
+        if assoc not in ('POINTS', 'CELLS'):
+            raise RuntimeError("apply_gradient: 'assoc' must be 'POINTS' or 'CELLS'.")
+
+    grad = Gradient(Input=src)
+    grad.ScalarArray = [assoc, array_name]
+    grad.ResultArrayName = result_name
+
+    # Optional derived quantities
+    if opts.get('compute_vorticity'):
+        grad.ComputeVorticity = 1
+        grad.VorticityArrayName = opts.get('vorticity_name', f"vort_{array_name}")
+    if opts.get('compute_divergence'):
+        grad.ComputeDivergence = 1
+        grad.DivergenceArrayName = opts.get('divergence_name', f"div_{array_name}")
+    if opts.get('compute_qcriterion'):
+        grad.ComputeQCriterion = 1
+        grad.QCriterionArrayName = opts.get('qcriterion_name', f"Q_{array_name}")
+
+    grad.UpdatePipeline()
+    return grad, result_name
+
+def calculate_k(src, prime_vec_name, axis_letter='Y', result_name='k'):
+    """
+    Compute turbulent kinetic energy-like quantity:
+        k = 0.5 * ( <u'_x^2> + <u'_y^2> + <u'_z^2> )
+    where <...> is spanwise average along axis_letter.
+
+    Assumes `prime_vec_name` is a 3-component vector in PointData or CellData.
+    Returns: (src_with_k, result_name)
+    """
+
+    # 0) Ensure the vector exists & find association
+    pnames, cnames = list_point_cell_arrays(src)
+    if prime_vec_name in pnames:
+        assoc = 'POINTS'
+    elif prime_vec_name in cnames:
+        assoc = 'CELLS'
+    else:
+        raise RuntimeError(
+            f"calculate_k: vector '{prime_vec_name}' not found. "
+            f"Point arrays: {pnames}; Cell arrays: {cnames}"
+        )
+
+    # 1) If needed, convert to points so averaging works on points
+    #    (apply_spanwise_average handles scalars in PointData best)
+    src_pts = ensure_points_for_array(src, prime_vec_name)
+
+    # 2) Make squared-component scalars via Calculator
+    #    ParaView Calculator uses component names like <V>_X, <V>_Y, <V>_Z
+    comps = ['X', 'Y', 'Z']
+    comp_sq_names = []
+    for c in comps:
+        calc = Calculator(Input=src_pts)
+        calc.ResultArrayName = f"{prime_vec_name.lower()}_{c.lower()}2"  # e.g., U_prime_Y_x2
+        calc.Function = f"{prime_vec_name}_{c}*{prime_vec_name}_{c}"
+        calc.UpdatePipeline()
+        src_pts = calc  # chain filters
+        comp_sq_names.append(calc.ResultArrayName)
+
+    # 3) Spanwise-average each squared scalar
+    avg_names = []
+    for name in comp_sq_names:
+        src_pts, avg_name = apply_spanwise_average(
+            src_pts, axis_letter=axis_letter, array_name=name
+        )
+        avg_names.append(avg_name)
+
+    # 4) Sum the averaged squares and multiply by 0.5 to get k
+    expr = "0.5*(" + "+".join(avg_names) + ")"
+    calc_k = Calculator(Input=src_pts)
+    calc_k.ResultArrayName = result_name
+    calc_k.Function = expr
+    calc_k.UpdatePipeline()
+
+    # Done
+    return calc_k, result_name
 
 def color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=None):
     vis = cfg.get("visualization", {}) or {}
@@ -653,8 +817,10 @@ def main():
             else:
                 prime_name = f"{base}_prime_{axis_letter}"
                 src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
+                src, grad_name = apply_gradient(src, prime_name)
+                src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
                 print(f"[pvpython-child] Added fluctuation array: {prime_name}")
-                effective_vis_array = prime_name
+                effective_vis_array = k_name
         else:
             effective_vis_array = vis_array
 
