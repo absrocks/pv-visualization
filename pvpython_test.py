@@ -23,7 +23,7 @@ INPUT_PARAMETERS = {
     'pattern_type': 'glob',
     'base_directory': './',
     'file_template': '*.foam',
-    'output_directory': './U_avg',
+    'output_directory': './out',
     'number_range': None,
 
     # ---- Averaging Options ----
@@ -48,8 +48,8 @@ INPUT_PARAMETERS = {
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'U_prime',                       # REQUIRED: array to visualize
-        'range': [0, 1],                      # e.g., [0.0, 5.0]; None = auto
+        'array': 'U',                       # REQUIRED: array to visualize
+        'range': [0, 0.2],                      # e.g., [0.0, 5.0]; None = auto
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
@@ -58,8 +58,17 @@ INPUT_PARAMETERS = {
 }
 
 # If pvpython is not on PATH, set the absolute path here:
-PVPYTHON_EXE = "pvpython"  # e.g., "/opt/ParaView-5.13.1/bin/pvpython"
+PROCESSING_OPTIONS = {
+    'paraview_executable': 'pvpython',
+    'paraview_args': ['--force-offscreen-rendering'],
+}
 
+MPI = {
+    "enabled": False,                   # set False to run serial
+    "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
+    "n": 8,                            # number of ranks
+    "extra_args": []                   # e.g. ["--bind-to","core"]
+}
 # -------------------------------
 # Child pvpython script (string)
 # -------------------------------
@@ -655,102 +664,138 @@ def calculate_k(src, prime_vec_name, axis_letter='Y', result_name='k'):
     # Done
     return calc_k, result_name
 
-def color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=None):
+def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=None, *more_arrays):
+    """
+    Render 1 or many arrays.
+    - Single array: behaves like before, saves into output_directory.
+    - Multiple arrays: creates subfolders per array and saves there.
+    zmin/zmax are accepted for future use (e.g., camera/clipping); ignored if None.
+    """
     vis = cfg.get("visualization", {}) or {}
     img_size = vis.get("image_size") or [1200, 800]
-    # Ensure exactly two ints
+    # ensure ints
     try:
-        w = int(round(float(img_size[0])))
-        h = int(round(float(img_size[1])))
+        w = int(round(float(img_size[0]))); h = int(round(float(img_size[1])))
     except Exception:
         raise RuntimeError(f"Invalid visualization.image_size: {img_size}. Expected [width, height].")
     img_res = (w, h)
 
-    cmap     = vis.get("color_map") or "Jet"
-    array    = desired_array if desired_array is not None else vis.get("array")
+    cmap     = vis.get("color_map") or "jet"
     rng      = vis.get("range")         # None or [min, max]
     show_bar = bool(vis.get("show_scalar_bar", False))
     bg       = vis.get("background", None)
+    cam_plane = (vis.get("camera_plane") or "XZ").upper()
 
-    outdir = cfg.get("output_directory") or "."
-    os.makedirs(outdir, exist_ok=True)
-    if os.path.exists(outdir) and not os.path.isdir(outdir):
-        raise RuntimeError(f"Path exists but is not a directory: {outdir}")
+    outdir_root = cfg.get("output_directory") or "."
+    os.makedirs(outdir_root, exist_ok=True)
+    if os.path.exists(outdir_root) and not os.path.isdir(outdir_root):
+        raise RuntimeError(f"Path exists but is not a directory: {outdir_root}")
 
-    if not array or not isinstance(array, str):
-        raise RuntimeError("Visualization 'array' must be a string (e.g., 'U', 'p', 'U_avg', 'U_prime').")
+    # collect arrays to render
+    arrays = []
+    if desired_array is not None:
+        if isinstance(desired_array, (list, tuple, set)):
+            arrays.extend(list(desired_array))
+        else:
+            arrays.append(desired_array)
+    if more_arrays:
+        arrays.extend(list(more_arrays))
+    if not arrays:
+        # fallback to config if nothing explicitly passed
+        a = vis.get("array")
+        if not a:
+            raise RuntimeError("No array(s) provided for visualization.")
+        arrays = [a]
 
+    # One render-view reused across arrays for speed
     view = GetActiveViewOrCreate('RenderView')
-    
-    
     if bg and isinstance(bg, (list, tuple)) and len(bg) == 3:
         view.Background = bg
-    view.ViewSize = [w, h]  # must be ints
+    view.ViewSize = [w, h]
 
-    disp = Show(src, view)
-    view.Update()
-    
-    # Set camera plane from config (default XZ)
-    cam_plane = (cfg.get("visualization", {}) or {}).get("camera_plane", "XZ")
-    set_camera_plane(view, src, zmin, zmax, plane=cam_plane)
-    
-    # Resolve special names with axis suffixes if needed
-    averaging = (cfg.get("averaging") or {})
-    axis_letter = (averaging.get("axis") or "Y").upper()
+    # common helper: resolve & render a single array to a specific folder
+    def _render_one(target_array, folder):
+        # resolve suffixes like 'U_avg'/'U_prime' → add axis if needed
+        averaging = (cfg.get("averaging") or {})
+        axis_letter = (averaging.get("axis") or "Y").upper()
 
-    # If the requested array is 'X_avg' or 'X_prime' without axis suffix, append axis.
-    if array.endswith("_avg") and f"{array}_{axis_letter}" not in list_point_cell_arrays(src)[0]:
-        array = f"{array}_{axis_letter}"
-    if array.endswith("_prime") and f"{array}_{axis_letter}" not in list_point_cell_arrays(src)[0]:
-        array = f"{array}_{axis_letter}"
+        arr = str(target_array)
+        # If user asked 'X_avg' without axis, append default axis if not found
+        if arr.endswith("_avg") and f"{arr}_{axis_letter}" not in list_point_cell_arrays(src)[0]:
+            arr = f"{arr}_{axis_letter}"
+        if arr.endswith("_prime") and f"{arr}_{axis_letter}" not in list_point_cell_arrays(src)[0]:
+            arr = f"{arr}_{axis_letter}"
 
-    pnames, cnames = list_point_cell_arrays(src)
-    if array in pnames:
-        assoc = "POINTS"
-    elif array in cnames:
-        assoc = "CELLS"
-    else:
-        raise RuntimeError(f"Requested array '{array}' not found. "
-                           f"POINT arrays: {pnames}; CELL arrays: {cnames}")
+        pnames, cnames = list_point_cell_arrays(src)
+        if arr in pnames:
+            assoc = "POINTS"
+        elif arr in cnames:
+            assoc = "CELLS"
+        else:
+            raise RuntimeError(f"Requested array '{arr}' not found. "
+                               f"POINT arrays: {pnames}; CELL arrays: {cnames}")
 
-    # If multi-component, use Magnitude; else direct
-    ncomp = get_array_components(src, assoc, array)
-    if ncomp and ncomp > 1:
-        ColorBy(disp, (assoc, array, "Magnitude"))
-    else:
-        ColorBy(disp, (assoc, array))
-    disp.SetScalarBarVisibility(view, show_bar)
-    view.Update()
-
-    # Colormap + range
-    lut = GetColorTransferFunction(array)
-    _apply_preset_safe(lut, str(cmap))
-    if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
-        r0, r1 = float(rng[0]), float(rng[1])
-        if not (r1 > r0):
-            raise RuntimeError("Invalid 'range'; expected [min, max] with max > min.")
-        lut.RescaleTransferFunction(r0, r1)
-        pwf = GetOpacityTransferFunction(array)
-        pwf.RescaleTransferFunction(r0, r1)
-
-    # Time handling
-    tk = GetTimeKeeper()
-    times = list(getattr(tk, "TimestepValues", []) or [])
-    if not times:
-        times = list(getattr(src, "TimestepValues", []) or [])
-
-    if times:
-        for t in times:
-            GetAnimationScene().AnimationTime = t
-            view.Update()
-            fname = f"{array}_t_{_safe_time_str(t)}.png"
-            SaveScreenshot(os.path.join(outdir, fname), view, ImageResolution=img_res)
-            print(f"[pvpython-child] Saved {os.path.join(outdir, fname)}")
-    else:
+        # show & color
+        disp = Show(src, view)
         view.Update()
-        fname = f"{array}_t_static.png"
-        SaveScreenshot(os.path.join(outdir, fname), view, ImageResolution=img_res)
-        print(f"[pvpython-child] Saved {os.path.join(outdir, fname)}")
+
+        # optional: orient camera (XZ by default)
+        try:
+            set_camera_plane(view, src, zmin, zmax, plane=cam_plane)
+        except Exception:
+            pass
+
+        ncomp = get_array_components(src, assoc, arr)
+        if ncomp and ncomp > 1:
+            ColorBy(disp, (assoc, arr, "Magnitude"))
+        else:
+            ColorBy(disp, (assoc, arr))
+        disp.SetScalarBarVisibility(view, show_bar)
+        view.Update()
+
+        # colormap + range
+        lut = GetColorTransferFunction(arr)
+        _apply_preset_safe(lut, str(cmap))
+        if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
+            r0, r1 = float(rng[0]), float(rng[1])
+            if not (r1 > r0):
+                raise RuntimeError("Invalid 'range'; expected [min, max] with max > min.")
+            lut.RescaleTransferFunction(r0, r1)
+            pwf = GetOpacityTransferFunction(arr)
+            pwf.RescaleTransferFunction(r0, r1)
+
+        # time handling
+        tk = GetTimeKeeper()
+        times = list(getattr(tk, "TimestepValues", []) or [])
+        if not times:
+            times = list(getattr(src, "TimestepValues", []) or [])
+
+        os.makedirs(folder, exist_ok=True)
+        if times:
+            for t in times:
+                GetAnimationScene().AnimationTime = t
+                view.Update()
+                fname = f"{arr}_t_{_safe_time_str(t)}.png"
+                SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
+                print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+        else:
+            view.Update()
+            fname = f"{arr}_t_static.png"
+            SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
+            print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+
+        # hide display before next array
+        Hide(src, view)
+        view.Update()
+
+    # single vs multiple
+    if len(arrays) == 1:
+        _render_one(arrays[0], outdir_root)
+    else:
+        for arr in arrays:
+            subdir = os.path.join(outdir_root, str(arr))
+            _render_one(arr, subdir)
+
 
 def main():
     args = parse_args()
@@ -791,39 +836,26 @@ def main():
     vis_array = (cfg.get("visualization", {}) or {}).get("array", None)
     averaging = (cfg.get("averaging") or {})
     default_axis = (averaging.get("axis") or "Y").upper()
-
-    derived = resolve_derived_request(vis_array, default_axis=default_axis)
     effective_vis_array = vis_array
-
+    
     try:
-        if derived:
-            base, kind, axis_letter = derived
-
-            # Ensure base array is loaded (point or cell)
-            pnames, cnames = list_point_cell_arrays(src)  # already flat
-            if (base not in pnames) and (base not in cnames):
-                raise RuntimeError(
-                    f"Base array '{base}' not loaded. "
-                    f"Make sure it's listed in 'openfoam.point_arrays' or 'openfoam.cell_arrays'. "
-                    f"Point arrays: {pnames}; Cell arrays: {cnames}"
-                )
-
-            # Compute average
-            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-            print(f"[pvpython-child] Added array: {avg_name}")
-
-            if kind == "avg":
-                effective_vis_array = avg_name
-            else:
-                prime_name = f"{base}_prime_{axis_letter}"
-                src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
-                src, grad_name = apply_gradient(src, prime_name)
-                src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
-                print(f"[pvpython-child] Added fluctuation array: {prime_name}")
-                effective_vis_array = k_name
-        else:
-            effective_vis_array = vis_array
-
+        
+        base = vis_array
+        axis_letter = default_axis
+        # Compute average
+    
+        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+        
+        print(f"[pvpython-child] Added array: {avg_name}")
+        prime_name = f"{base}_prime_{axis_letter}"
+        
+        src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
+        src, grad_name = apply_gradient(src, prime_name)
+        src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
+        print(f"[pvpython-child] Added fluctuation array: {prime_name}")
+        effective_vis_array1 = k_name
+        effective_vis_array2 = prime_name
+        
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
         return 6
@@ -832,7 +864,7 @@ def main():
     
     # ---- Render & save ----
     try:
-        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=[effective_vis_array1,effective_vis_array2])
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
@@ -853,17 +885,32 @@ def find_input_files(cfg: dict) -> list:
         return [str(p) for p in sorted(base.glob(cfg['file_template']))]
     return []
 
-def run_pvpython_child(script_text: str, files: list, pvpython: str, cfg_obj: dict) -> int:
+def run_pvpython_child(script_text: str, files: list, cfg_obj: dict) -> int:
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as sfile, \
          tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as cfile:
         sfile.write(script_text)
         script_path = sfile.name
         json.dump(cfg_obj, cfile)
         cfg_path = cfile.name
-
-    cmd = [pvpython, script_path, "--config-file", cfg_path] + files
+    
+    # Build base command from config
+    exe = PROCESSING_OPTIONS.get('paraview_executable', 'pvpython')
+    extra = PROCESSING_OPTIONS.get('paraview_args', []) or []
+    if not isinstance(extra, (list, tuple)):
+        raise RuntimeError("PROCESSING_OPTIONS['paraview_args'] must be a list")
+    
+    base = [str(exe)] + [str(a) for a in extra] + [script_path, "--config-file", cfg_path] + [str(f) for f in files]
+    
+    # Prepend MPI launcher if enabled
+    if MPI.get("enabled"):
+        launch = [str(MPI.get('launcher', 'mpiexec')), "-n", str(MPI.get('n', 2))]
+        launch += [str(a) for a in (MPI.get('extra_args', []) or [])]
+        cmd = launch + base
+    else:
+        cmd = base
+    
     print("[driver] Running:", " ".join(shlex.quote(c) for c in cmd))
-
+    
     try:
         res = subprocess.run(cmd, text=True, capture_output=True, check=False)
         if res.stdout:
@@ -898,7 +945,6 @@ def main():
     rc = run_pvpython_child(
         SCRIPT_CONTENT,
         files=files,
-        pvpython=PVPYTHON_EXE,
         cfg_obj=cfg
     )
     if rc != 0:
