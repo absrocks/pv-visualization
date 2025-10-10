@@ -33,14 +33,14 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 14.0,
-        'Xmax': 25.0,
+        'Xmin': 2.0,
+        'Xmax': 4.0,
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
+        'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
-        'cell_arrays':  ['U', 'alpha.water'],         # or [] / None
+        'cell_arrays':  ['U', 'alpha.water'],         # or [] / None , 'UAvg', 'nut
         'point_arrays': ['U', 'alpha.water'],         # e.g., ['T']
     },
 
@@ -59,12 +59,12 @@ INPUT_PARAMETERS = {
 
 # If pvpython is not on PATH, set the absolute path here:
 PROCESSING_OPTIONS = {
-    'paraview_executable': 'pvbatch',
+    'paraview_executable': 'pvpython',                  # 'pvpython' | 'pvbatch'
     'paraview_args': ['--force-offscreen-rendering'],
 }
 
 MPI = {
-    "enabled": True,                   # set False to run serial
+    "enabled": False,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
     "n": 64,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
@@ -224,6 +224,30 @@ def _domain_bounds(src):
         raise RuntimeError("Cannot get dataset bounds for clipping.")
     return b  # (xmin,xmax, ymin,ymax, zmin,zmax)
 
+def apply_slices(src):
+
+    # create a new 'Extract Surface'
+    cur = MergeBlocks(Input=src)
+    #src.UpdatePipeline()
+    extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=cur)
+    
+    (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
+    pos   = [(xmax-xmin)/2, (ymax-ymin)/2, (zmax-zmin)/2]
+    
+    slice1 = Slice(registrationName='Slice1', Input=extractSurface1)
+    slice1.SliceType = 'Plane'
+    slice1.HyperTreeGridSlicer = 'Plane'
+    
+    # init the 'Plane' selected for 'SliceType'
+    slice1.SliceType.Origin = pos
+    slice1.SliceType.Normal = [0.0, 1.0, 0.0]
+    
+    slice1.UpdatePipeline()
+    sliceShow = Show(slice1)
+    sliceShow.Representation = 'Outline'
+    
+    return src
+    
 def apply_clipping_if_requested(src, cfg):
     """
     If cfg['clipping'] is enabled, apply a Box clip:
@@ -369,6 +393,7 @@ def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
 
     # Check availability on current source (no need to flatten just to list names)
     pnames, cnames = list_point_cell_arrays(src)
+    print("pnames",pnames)
     if field in pnames:
         assoc = 'POINTS'
     elif field in cnames:
@@ -811,11 +836,7 @@ def main():
     
     src, zmin, zmax = apply_clipping_if_requested(src, cfg)
     
-    # create a new 'Extract Surface'
-    extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=src)
-    extractShow = Show(extractSurface1)
-    extractShow.Representation = 'Outline'
-    extractShow.UpdatePipeline()
+    src= apply_slices(src)
     
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
@@ -850,7 +871,7 @@ def main():
         prime_name = f"{base}_prime_{axis_letter}"
         
         src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
-        src, grad_name = apply_gradient(src, prime_name)
+        #src, grad_name = apply_gradient(src, prime_name)
         src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
         print(f"[pvpython-child] Added fluctuation array: {prime_name}")
         effective_vis_array1 = k_name
