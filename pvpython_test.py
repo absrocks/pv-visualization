@@ -33,12 +33,12 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 2.0,
-        'Xmax': 4.0,
+        'Xmin': 14.0,
+        'Xmax': 25.0,
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
+        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
         'cell_arrays':  ['U', 'alpha.water'],         # or [] / None
         'point_arrays': ['U', 'alpha.water'],         # e.g., ['T']
@@ -59,14 +59,14 @@ INPUT_PARAMETERS = {
 
 # If pvpython is not on PATH, set the absolute path here:
 PROCESSING_OPTIONS = {
-    'paraview_executable': 'pvpython',
+    'paraview_executable': 'pvbatch',
     'paraview_args': ['--force-offscreen-rendering'],
 }
 
 MPI = {
-    "enabled": False,                   # set False to run serial
+    "enabled": True,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
-    "n": 8,                            # number of ranks
+    "n": 64,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
 }
 # -------------------------------
@@ -864,7 +864,7 @@ def main():
     
     # ---- Render & save ----
     try:
-        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=[effective_vis_array1,effective_vis_array2])
+        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array1)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
