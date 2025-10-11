@@ -53,6 +53,7 @@ INPUT_PARAMETERS = {
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
+        'axis': False,
     },
     
 }
@@ -310,7 +311,7 @@ def apply_clipping_if_requested(src, cfg):
     print(f"[pvpython-child] Applied Box clip on {axis} in [{amin}, {amax}]")
     return clip1, zmin, zmax
 
-def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
+def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     """
     Orient camera to show a principal plane.
     'XZ' -> look along +Y, Z is up (XZ plane visible)
@@ -357,16 +358,17 @@ def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
         view.CameraViewUp = [0, 0, 1]
         view.CameraFocalDisk = 1.0
         view.CameraParallelProjection = 1
-        # Set Axis
-        view.AxesGrid.Visibility = 1
-        view.AxesGrid.AxesToLabel = 5
-        
-        # For data axes:
-        view.AxesGrid.XAxisUseCustomLabels = 1
-        view.AxesGrid.XAxisLabels = xlim.tolist()
-        
-        view.AxesGrid.ZAxisUseCustomLabels = 1
-        view.AxesGrid.ZAxisLabels = zlim.tolist()
+        if cfg.get("visualization")["axis"] is True:
+            # Set Axis
+            view.AxesGrid.Visibility = 1
+            view.AxesGrid.AxesToLabel = 5
+            
+            # For data axes:
+            view.AxesGrid.XAxisUseCustomLabels = 1
+            view.AxesGrid.XAxisLabels = xlim.tolist()
+            
+            view.AxesGrid.ZAxisUseCustomLabels = 1
+            view.AxesGrid.ZAxisLabels = zlim.tolist()
 
     try:
         view.ResetCamera(False)  # keep our orientation, just fit
@@ -789,7 +791,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
         # optional: orient camera (XZ by default)
         try:
-            set_camera_plane(view, src, zmin, zmax, plane=cam_plane)
+            set_camera_plane(view, src, cfg, zmin, zmax, plane=cam_plane)
         except Exception:
             pass
 
@@ -857,9 +859,11 @@ def main():
         # Load dataset
     src = pick_reader(fname, cfg)
     
-    src, zmin, zmax = apply_clipping_if_requested(src, cfg)
-    
-    src= apply_slices(src)
+    if cfg.get("clipping")["enabled"] is True:
+        src, zmin, zmax = apply_clipping_if_requested(src, cfg)
+        
+    if cfg.get("visualization")["axis"] is True:
+        src= apply_slices(src)
     
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
