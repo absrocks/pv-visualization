@@ -246,6 +246,19 @@ def apply_slices(src):
     sliceShow = Show(slice1)
     sliceShow.Representation = 'Outline'
     
+    # create a new 'Annotate Time Filter'
+    annotateTimeFilter1 = AnnotateTimeFilter(registrationName='AnnotateTimeFilter1', Input=slice1)
+    annotateTimeFilter1.Format = 'Time: {time:.2f}s'
+    
+    annotateTimeFilter1Display = Show(annotateTimeFilter1)
+
+    # trace defaults for the display properties.
+    annotateTimeFilter1Display.Set(
+        WindowLocation='Upper Center',
+        FontSize=24,
+    )
+
+    
     return src
     
 def apply_clipping_if_requested(src, cfg):
