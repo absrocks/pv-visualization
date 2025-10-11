@@ -374,20 +374,31 @@ def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
         pass
     
 
-def _apply_preset_safe(lut, preset):
+def _apply_preset_safe(lut, preset, view):
     tried = [preset, preset.title(), preset.upper(), preset.capitalize()]
     for name in tried:
         try:
             lut.ApplyPreset(name, True)
-            return True
+            break
         except Exception:
             pass
     try:
         ApplyPreset(lut, preset, True)
-        return True
     except Exception:
-        return False
-
+        pass
+    
+    if view is not None:
+        try:
+            sb = GetScalarBar(lut, view)
+            if sb is not None:
+                sb.AutomaticLabelFormat = 0
+                sb.LabelFormat = '%-#6.2f'
+                sb.RangeLabelFormat = '%-#6.2f'
+        except Exception:
+            # Ignore if scalar bar isn't available/visible yet
+            pass
+    return True
+    
 def _safe_time_str(t):
     s = str(t)
     return s.replace(" ", "_").replace(":", "_").replace("/", "_").replace("\\", "_")
@@ -793,7 +804,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
         # colormap + range
         lut = GetColorTransferFunction(arr)
-        _apply_preset_safe(lut, str(cmap))
+        _apply_preset_safe(lut, str(cmap), view)
         if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
             r0, r1 = float(rng[0]), float(rng[1])
             if not (r1 > r0):
