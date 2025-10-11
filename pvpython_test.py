@@ -330,7 +330,7 @@ def set_camera_plane(view, src, zmin, zmax, plane="XZ", dist_factor=1.5):
     R = dist_factor * _bi.max(rx, ry, rz, 1e-6)
     
     xlim = np.linspace(b[0], b[1], 5)
-    zlim = np.linspace(zmin, zmax, 5)
+    zlim = np.linspace(zmin, zmax, 3)
     
     # For view axes:
     view.AxesGrid.XTitle = 'X (m)'
@@ -417,7 +417,6 @@ def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
 
     # Check availability on current source (no need to flatten just to list names)
     pnames, cnames = list_point_cell_arrays(src)
-    print("pnames",pnames)
     if field in pnames:
         assoc = 'POINTS'
     elif field in cnames:
