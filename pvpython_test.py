@@ -33,23 +33,26 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 2.0,
-        'Xmax': 4.0,
+        'Xmin': 21.0,
+        'Xmax': 34.0,
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
+        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
-        'cell_arrays':  ['U', 'alpha.water', 'nut'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water', 'nut'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water', 'nut', 'UAvg'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water', 'nut', 'UAvg'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'U',                       # REQUIRED: array to visualize
+        'array': 'UAvg',                       # REQUIRED: array to visualize
+        'out_array': 'k',
         'range': [0, 0.2],                      # e.g., [0.0, 5.0]; None = auto
+        'custom_label': None, # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],  # e.g. None
+        'label_format': '6.2f',  # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
@@ -60,12 +63,12 @@ INPUT_PARAMETERS = {
 
 # If pvpython is not on PATH, set the absolute path here:
 PROCESSING_OPTIONS = {
-    'paraview_executable': 'pvpython',                  # 'pvpython' | 'pvbatch'
+    'paraview_executable': 'pvbatch',                  # 'pvpython' | 'pvbatch'
     'paraview_args': ['--force-offscreen-rendering'],
 }
 
 MPI = {
-    "enabled": False,                   # set False to run serial
+    "enabled": True,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
     "n": 64,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
@@ -79,6 +82,91 @@ from paraview.simple import *
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 import numpy as np
 import builtins as _bi
+
+def main():
+    args = parse_args()
+    cfg = load_cfg(args.config_file)
+
+    fname = args.files[0]
+    if not os.path.exists(fname):
+        print(f"ERROR: File not found: {fname}", file=sys.stderr)
+        return 3
+    else:
+        print(f"[pvpython-child] Loaded: {fname}")
+
+        # Load dataset
+    src = pick_reader(fname, cfg)
+    pnames, cnames = list_point_cell_arrays(src)
+    info = src.GetDataInformation()
+    npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
+    print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
+
+    if npts == 0:
+        print("ERROR: No data points found", file=sys.stderr)
+        return 4
+
+    if cfg.get("clipping")["enabled"] is True:
+        src, zmin, zmax = apply_clipping(src, cfg)
+        
+    if cfg.get("visualization")["axis"] is True:
+        src= apply_slices(src)
+    
+    # Apply IsoVolume
+    src = apply_isovolume(src, cfg)
+    
+    # FLATTEN first, so everything downstream sees real vtkDataArrays:
+    src = flatten_dataset(src)
+
+    
+
+    # ---- Decide/compute derived arrays if requested ----
+    vis_array = cfg.get("visualization")["array"]
+    print("vis_array", vis_array)
+    averaging = cfg.get("averaging")
+    default_axis = averaging.get("axis")
+    effective_vis_array = vis_array
+    
+    
+    try:
+        base = vis_array
+        axis_letter = default_axis
+        # Compute average
+        
+        if 'k' in cfg.get("visualization")["out_array"]:
+            print(f"[pvpython-child] TKE output will be written")
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"[pvpython-child] Calculated array: {avg_name}")
+            prime_name = f"{base}_prime_{axis_letter}"
+            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
+            effective_vis_array = k_name
+            print(f"[pvpython-child] Added array: {k_name}")
+        
+        if 'eps' in cfg.get("visualization")["out_array"]:
+            print(f"[pvpython-child] Epsilon output will be written")
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"[pvpython-child] Calculated array: {avg_name}")
+            prime_name = f"{base}_prime_{axis_letter}"
+            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src, grad_name = apply_gradient(src, prime_name)
+            src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
+            effective_vis_array = eps_name
+            print(f"[pvpython-child] Added array: {eps_name}")
+        
+    except Exception as e:
+        print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
+        return 6
+    
+    # ---- Render & save ----
+    try:
+        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+    except Exception as e:
+        print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
+        return 7
+
+    print("[pvpython-child] Completed successfully.")
+    return 0
 
 def resolve_derived_request(name, default_axis='Y'):
     """
@@ -376,7 +464,8 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
         pass
     
 
-def _apply_preset_safe(lut, preset, view):
+def _apply_preset_safe(lut, preset, view, vis):
+    #print("vis",vis)
     tried = [preset, preset.title(), preset.upper(), preset.capitalize()]
     for name in tried:
         try:
@@ -394,8 +483,15 @@ def _apply_preset_safe(lut, preset, view):
             sb = GetScalarBar(lut, view)
             if sb is not None:
                 sb.AutomaticLabelFormat = 0
-                sb.LabelFormat = '%-#6.2f'
-                sb.RangeLabelFormat = '%-#6.2f'
+                if vis.get("custom_label") is not None:
+                    sb.UseCustomLabels = 1
+                    sb.CustomLabels=vis.get("custom_label")
+                    pass
+                sb.LabelFormat = '%-#'+vis.get("label_format") #'%-#6.1e'
+                sb.RangeLabelFormat = '%-#'+vis.get("label_format") #'%-#6.1e'
+                if "eps" in vis.get("out_array"):
+                    sb.Title='$\\epsilon$'
+                    
         except Exception:
             # Ignore if scalar bar isn't available/visible yet
             pass
@@ -792,7 +888,6 @@ def calculate_epsilon(src, s2_array, axis_letter='Y', result_name='eps', nut_nam
     calc_m.ResultArrayName = eps_m_name
     calc_m.Function = f"{2.0*float(nu)}*{s2_array}"
     calc_m.UpdatePipeline()
-    print("axis", axis_letter)
     # --- spanwise average each scalar we just created ---
     calc_m, eps_t_avg = apply_spanwise_average(calc_m, axis_letter=axis_letter, array_name=eps_t_name)
     calc_m, eps_m_avg = apply_spanwise_average(calc_m, axis_letter=axis_letter, array_name=eps_m_name)
@@ -879,12 +974,13 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         raise RuntimeError(f"Invalid visualization.image_size: {img_size}. Expected [width, height].")
     img_res = (w, h)
 
-    cmap     = vis.get("color_map") or "jet"
+    cmap     = vis.get("color_map")
     rng      = vis.get("range")         # None or [min, max]
     show_bar = bool(vis.get("show_scalar_bar", False))
     bg       = vis.get("background", None)
-    cam_plane = (vis.get("camera_plane") or "XZ").upper()
-
+    cam_plane = vis.get("camera_plane")
+    out_array = vis.get("out_array")
+    
     outdir_root = cfg.get("output_directory") or "."
     os.makedirs(outdir_root, exist_ok=True)
     if os.path.exists(outdir_root) and not os.path.isdir(outdir_root):
@@ -954,7 +1050,9 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
         # colormap + range
         lut = GetColorTransferFunction(arr)
-        _apply_preset_safe(lut, str(cmap), view)
+        if "eps" in out_array:
+            lut.UseLogScale=1
+        _apply_preset_safe(lut, str(cmap), view, vis)
         if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
             r0, r1 = float(rng[0]), float(rng[1])
             if not (r1 > r0):
@@ -995,83 +1093,6 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
             subdir = os.path.join(outdir_root, str(arr))
             _render_one(arr, subdir)
 
-
-def main():
-    args = parse_args()
-    cfg = load_cfg(args.config_file)
-
-    fname = args.files[0]
-    if not os.path.exists(fname):
-        print(f"ERROR: File not found: {fname}", file=sys.stderr)
-        return 3
-
-        # Load dataset
-    src = pick_reader(fname, cfg)
-    pnames, cnames = list_point_cell_arrays(src)
-    print("pnames", pnames)
-    print("cnames", cnames)
-    if cfg.get("clipping")["enabled"] is True:
-        src, zmin, zmax = apply_clipping(src, cfg)
-        
-    if cfg.get("visualization")["axis"] is True:
-        src= apply_slices(src)
-    
-    # Apply IsoVolume
-    src = apply_isovolume(src, cfg)
-    
-    # FLATTEN first, so everything downstream sees real vtkDataArrays:
-    src = flatten_dataset(src)
-
-    info = src.GetDataInformation()
-    npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
-    print(f"[pvpython-child] Loaded: {fname}")
-    print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
-
-    if npts == 0:
-        print("ERROR: No data points found", file=sys.stderr)
-        return 4
-
-    # ---- Decide/compute derived arrays if requested ----
-    vis_array = (cfg.get("visualization", {}) or {}).get("array", None)
-    averaging = (cfg.get("averaging") or {})
-    default_axis = averaging.get("axis")
-    effective_vis_array = vis_array
-    
-    try:
-        
-        base = vis_array
-        axis_letter = default_axis
-        # Compute average
-        
-        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-        
-        print(f"[pvpython-child] Added array: {avg_name}")
-        prime_name = f"{base}_prime_{axis_letter}"
-        
-        src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
-        
-        src, grad_name = apply_gradient(src, prime_name)
-        src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
-        src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
-        src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='eps')
-        print(f"[pvpython-child] Added fluctuation array: {prime_name}")
-        
-        effective_vis_array1 = eps_name
-        effective_vis_array2 = prime_name
-        
-    except Exception as e:
-        print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
-        return 6
-    
-    # ---- Render & save ----
-    try:
-        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array1)
-    except Exception as e:
-        print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
-        return 7
-
-    print("[pvpython-child] Completed successfully.")
-    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
