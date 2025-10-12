@@ -40,8 +40,8 @@ INPUT_PARAMETERS = {
     'openfoam': {
         'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
-        'cell_arrays':  ['U', 'alpha.water'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water', 'nut'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water', 'nut'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
@@ -53,7 +53,7 @@ INPUT_PARAMETERS = {
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
-        'axis': False,
+        'axis': True,
     },
     
 }
@@ -262,7 +262,7 @@ def apply_slices(src):
     
     return src
     
-def apply_clipping_if_requested(src, cfg):
+def apply_clipping(src, cfg):
     """
     If cfg['clipping'] is enabled, apply a Box clip:
       - along the requested axis, use [min, max] from config
@@ -400,7 +400,35 @@ def _apply_preset_safe(lut, preset, view):
             # Ignore if scalar bar isn't available/visible yet
             pass
     return True
-    
+
+def find_array_assoc(src, name):
+    """Return ('POINTS'|'CELLS', ncomp) for the first match of array `name`."""
+    info = src.GetDataInformation()
+
+    pdi = info.GetPointDataInformation()
+    for i in range(pdi.GetNumberOfArrays()):
+        ai = pdi.GetArrayInformation(i)
+        if ai.GetName() == name:
+            return 'POINTS', ai.GetNumberOfComponents()
+
+    cdi = info.GetCellDataInformation()
+    for i in range(cdi.GetNumberOfArrays()):
+        ai = cdi.GetArrayInformation(i)
+        if ai.GetName() == name:
+            return 'CELLS', ai.GetNumberOfComponents()
+
+    return None, None  # not found
+
+
+def print_array_components(src, name, label=None):
+    """Print association and #components of array `name` on `src`."""
+    assoc, ncomp = find_array_assoc(src, name)
+    if assoc is None:
+        print(f"[debug] Array '{name}' not found on source.")
+    else:
+        tag = f" ({label})" if label else ""
+        print(f"[debug] Array '{name}'{tag}: assoc={assoc}, components={ncomp}")
+
 def _safe_time_str(t):
     s = str(t)
     return s.replace(" ", "_").replace(":", "_").replace("/", "_").replace("\\", "_")
@@ -441,7 +469,8 @@ def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
 
     print(f"[pvpython-child] Applied IsoVolume on {assoc}:{field} in [{r0}, {r1}]")
     return iso
-    
+
+
 def apply_spanwise_average(src, axis_letter='Y', array_name='U'):
     """
     Generic spanwise averaging for scalar or vector arrays.
@@ -549,6 +578,83 @@ out.GetPointData().AddArray(avg_vtk)
 
     avg_name = f"{array_name}_avg_{axis_letter.upper()}"
     return pf, avg_name
+
+def strain_rate(src, array_name, out_name=None):
+    """
+    From a vector gradient array (9 comps; 4 for 2D) named `array_name`,
+    compute S2 = sum_ij S_ij^2 where S = 0.5 * (G + G^T).
+    Returns: (source_with_S2, out_array_name)
+    """
+    out_name = out_name or f"S2_{array_name}"
+
+    PF = """
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+import numpy as np
+
+inp = self.GetInputDataObject(0, 0)
+wrap = dsa.WrapDataObject(inp)
+pd = wrap.PointData
+cd = wrap.CellData
+
+name = "__GRAD__"
+if name in pd.keys():
+    data = pd
+    out_to_points = True
+elif name in cd.keys():
+    data = cd
+    out_to_points = False
+else:
+    raise RuntimeError("strain_rate PF: array '%s' not found in PointData or CellData." % name, nut)
+
+arr = data[name]              # dsa array view; may be (N,9) or (N,3,3)
+
+shape = arr.shape
+# Normalize to a NumPy array and an (N,3,3) tensor stack
+if len(shape) == 2 and shape[1] == 9:
+    G = np.asarray(arr).reshape(-1, 3, 3)
+elif len(shape) == 3 and shape[1] == 3 and shape[2] == 3:
+    G = np.asarray(arr)  # already (N,3,3)
+elif len(shape) == 2 and shape[1] == 4:
+    # 2D vector gradient → pad to 3×3
+    G = np.zeros((shape[0], 3, 3), dtype=float)
+    flat = np.asarray(arr)
+    # [dUx/dx, dUx/dy, dUy/dx, dUy/dy]
+    G[:,0,0] = flat[:,0]; G[:,0,1] = flat[:,1]
+    G[:,1,0] = flat[:,2]; G[:,1,1] = flat[:,3]
+else:
+    raise RuntimeError(
+        f"strain_rate PF: unsupported gradient array shape {shape}; "
+        f"expected (N,9) or (N,3,3) [3D], or (N,4) [2D]"
+    )
+
+# Debug: show what we actually saw
+#print("[pf] reading", name, " assoc=", "POINTS" if out_to_points else "CELLS", " shape=", G.shape)
+
+S  = 0.5 * (G + np.swapaxes(G, 1, 2))
+S2 = np.sum(S * S, axis=(1, 2))
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+arr = ns.numpy_to_vtk(S2.copy(), deep=1)
+arr.SetName("__OUT__")
+if out_to_points:
+    out.GetPointData().AddArray(arr)
+else:
+    out.GetCellData().AddArray(arr)
+""".lstrip()
+
+    code = (PF
+            .replace("__GRAD__", array_name)
+            .replace("__OUT__", out_name))
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = code
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+    return pf, out_name
 
 def add_fluctuation(src, base_array, avg_array, out_name):
     """
@@ -658,6 +764,49 @@ def apply_gradient(src, array_name, assoc=None, opts=None):
     grad.UpdatePipeline()
     return grad, result_name
 
+def calculate_epsilon(src, s2_array, axis_letter='Y', result_name='eps', nut_name='nut', nu=1e-6):
+    """
+    Compute epsilon = <2*nut*S2>_axis + <2*nu*S2>_axis, where S2 is a scalar array (e.g., from strain-rate).
+    Returns: (src_with_eps, result_name)
+    """
+    # --- check inputs exist somewhere ---
+    pnames, cnames = list_point_cell_arrays(src)
+    if (s2_array not in pnames) and (s2_array not in cnames):
+        raise RuntimeError(f"calculate_epsilon: '{s2_array}' not found. Point arrays: {pnames}; Cell arrays: {cnames}")
+    if (nut_name not in pnames) and (nut_name not in cnames):
+        raise RuntimeError(f"calculate_epsilon: '{nut_name}' not found. Point arrays: {pnames}; Cell arrays: {cnames}")
+
+    # --- ensure both live on points (averaging pipeline works on points) ---
+    src_pts = ensure_points_for_array(src, s2_array)
+    src_pts = ensure_points_for_array(src_pts, nut_name)
+
+    # --- calculators for eps_t and eps_m (keep both by chaining) ---
+    eps_t_name = f"eps_t_{s2_array}"
+    calc_t = Calculator(Input=src_pts)
+    calc_t.ResultArrayName = eps_t_name
+    calc_t.Function = f"2*{nut_name}*{s2_array}"
+    calc_t.UpdatePipeline()
+
+    eps_m_name = f"eps_m_{s2_array}"
+    calc_m = Calculator(Input=calc_t)
+    calc_m.ResultArrayName = eps_m_name
+    calc_m.Function = f"{2.0*float(nu)}*{s2_array}"
+    calc_m.UpdatePipeline()
+    print("axis", axis_letter)
+    # --- spanwise average each scalar we just created ---
+    calc_m, eps_t_avg = apply_spanwise_average(calc_m, axis_letter=axis_letter, array_name=eps_t_name)
+    calc_m, eps_m_avg = apply_spanwise_average(calc_m, axis_letter=axis_letter, array_name=eps_m_name)
+
+    # --- sum the averaged parts into final epsilon ---
+    calc_sum = Calculator(Input=calc_m)
+    calc_sum.ResultArrayName = result_name
+    calc_sum.Function = f"{eps_t_avg}+{eps_m_avg}"
+    calc_sum.UpdatePipeline()
+
+    return calc_sum, result_name
+
+    
+    
 def calculate_k(src, prime_vec_name, axis_letter='Y', result_name='k'):
     """
     Compute turbulent kinetic energy-like quantity:
@@ -858,9 +1007,11 @@ def main():
 
         # Load dataset
     src = pick_reader(fname, cfg)
-    
+    pnames, cnames = list_point_cell_arrays(src)
+    print("pnames", pnames)
+    print("cnames", cnames)
     if cfg.get("clipping")["enabled"] is True:
-        src, zmin, zmax = apply_clipping_if_requested(src, cfg)
+        src, zmin, zmax = apply_clipping(src, cfg)
         
     if cfg.get("visualization")["axis"] is True:
         src= apply_slices(src)
@@ -883,7 +1034,7 @@ def main():
     # ---- Decide/compute derived arrays if requested ----
     vis_array = (cfg.get("visualization", {}) or {}).get("array", None)
     averaging = (cfg.get("averaging") or {})
-    default_axis = (averaging.get("axis") or "Y").upper()
+    default_axis = averaging.get("axis")
     effective_vis_array = vis_array
     
     try:
@@ -891,24 +1042,26 @@ def main():
         base = vis_array
         axis_letter = default_axis
         # Compute average
-    
+        
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         
         print(f"[pvpython-child] Added array: {avg_name}")
         prime_name = f"{base}_prime_{axis_letter}"
         
         src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
-        #src, grad_name = apply_gradient(src, prime_name)
+        
+        src, grad_name = apply_gradient(src, prime_name)
         src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
+        src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
+        src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='eps')
         print(f"[pvpython-child] Added fluctuation array: {prime_name}")
-        effective_vis_array1 = k_name
+        
+        effective_vis_array1 = eps_name
         effective_vis_array2 = prime_name
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
         return 6
-    
-    
     
     # ---- Render & save ----
     try:
