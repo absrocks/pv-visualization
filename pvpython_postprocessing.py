@@ -33,12 +33,12 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 21.0,
-        'Xmax': 34.0,
+        'Xmin': 2.0,
+        'Xmax': 4.0,
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
+        'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
         'cell_arrays':  ['U', 'alpha.water', 'nut', 'UAvg'],         # or [] / None , 'UAvg', 'nut
         'point_arrays': ['U', 'alpha.water', 'nut', 'UAvg'],         # e.g., ['T']
@@ -68,9 +68,9 @@ PROCESSING_OPTIONS = {
 }
 
 MPI = {
-    "enabled": True,                   # set False to run serial
+    "enabled": False,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
-    "n": 64,                            # number of ranks
+    "n": 128,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
 }
 # -------------------------------
@@ -106,18 +106,17 @@ def main():
         return 4
 
     if cfg.get("clipping")["enabled"] is True:
-        src, zmin, zmax = apply_clipping(src, cfg)
+        src = apply_clipping(src, cfg)
         
     if cfg.get("visualization")["axis"] is True:
         src= apply_slices(src)
+    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
-
-    
 
     # ---- Decide/compute derived arrays if requested ----
     vis_array = cfg.get("visualization")["array"]
@@ -331,9 +330,17 @@ def apply_slices(src):
     slice1.SliceType.Origin = pos
     slice1.SliceType.Normal = [0.0, 1.0, 0.0]
     
-    slice1.UpdatePipeline()
+    # create a new 'Redistribute DataSet'
+    redistributeDataSet1 = RedistributeDataSet(registrationName='RedistributeDataSet1', Input=slice1)
+    redistributeDataSet1.NumberOfPartitions = 0
+    redistributeDataSet1.GenerateGlobalCellIds = 1
+    
+    redistributeDataSet1.UpdatePipeline()
     sliceShow = Show(slice1)
     sliceShow.Representation = 'Outline'
+    
+    DataShow = Show(redistributeDataSet1)
+    DataShow.Representation = 'Feature Edges'
     
     # create a new 'Annotate Time Filter'
     annotateTimeFilter1 = AnnotateTimeFilter(registrationName='AnnotateTimeFilter1', Input=slice1)
@@ -348,8 +355,9 @@ def apply_slices(src):
             FontSize=24,
         )
     except Exception:
-        annotateTimeFilter1Display.WindowLocation = 'Upper Center'
-        annotateTimeFilter1Display.FontSize = 24
+        try:
+            annotateTimeFilter1Display.WindowLocation = 'Upper Center'
+            annotateTimeFilter1Display.FontSize = 24
         except Exception:
             raise RuntimeError("Couldn't set the Time Filter Option")
     
@@ -362,12 +370,8 @@ def apply_clipping(src, cfg):
       - along the other axes, span the whole domain
     Returns the clipped source (Clip filter output).
     """
-    clip_cfg = (cfg.get('clipping') or {})
-    enabled = clip_cfg.get('enabled', False) or bool(clip_cfg)  # treat presence as enabled if you like
-    if not enabled:
-        return src
-
-    axis = (clip_cfg.get('axis') or 'X').upper()
+    clip_cfg = cfg.get('clipping')
+    axis = clip_cfg.get('axis')
     if axis not in ('X','Y','Z'):
         raise RuntimeError(f"Invalid clipping axis: {axis}")
 
@@ -402,7 +406,7 @@ def apply_clipping(src, cfg):
     clip1.UpdatePipeline()
 
     print(f"[pvpython-child] Applied Box clip on {axis} in [{amin}, {amax}]")
-    return clip1, zmin, zmax
+    return clip1
 
 def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     """
@@ -423,7 +427,7 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     rz = (b[5] - b[4])
     R = dist_factor * _bi.max(rx, ry, rz, 1e-6)
     
-    xlim = np.linspace(b[0], b[1], 5)
+    xlim = np.arange(b[0], b[1]+1)
     zlim = np.linspace(zmin, zmax, 3)
     
     # For view axes:
