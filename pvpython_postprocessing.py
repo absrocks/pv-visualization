@@ -342,11 +342,16 @@ def apply_slices(src):
     annotateTimeFilter1Display = Show(annotateTimeFilter1)
 
     # trace defaults for the display properties.
-    annotateTimeFilter1Display.Set(
-        WindowLocation='Upper Center',
-        FontSize=24,
-    )
-
+    try:
+        annotateTimeFilter1Display.Set(
+            WindowLocation='Upper Center',
+            FontSize=24,
+        )
+    except Exception:
+        annotateTimeFilter1Display.WindowLocation = 'Upper Center'
+        annotateTimeFilter1Display.FontSize = 24
+        except Exception:
+            raise RuntimeError("Couldn't set the Time Filter Option")
     
     return src
     
