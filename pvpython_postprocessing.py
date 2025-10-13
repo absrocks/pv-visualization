@@ -25,6 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
+    'start_time': 20,        # None --> to start from 0
 
     # ---- Averaging Options ----
     'averaging': {
@@ -33,12 +34,12 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 2.0,
-        'Xmax': 4.0,
+        'Xmin': 21.0,
+        'Xmax': 34.0,
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'reconstructed',            # 'reconstructed' | 'decomposed' | 'auto'
+        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],   # or [] / None
         'cell_arrays':  ['U', 'alpha.water', 'nut', 'UAvg'],         # or [] / None , 'UAvg', 'nut
         'point_arrays': ['U', 'alpha.water', 'nut', 'UAvg'],         # e.g., ['T']
@@ -68,7 +69,7 @@ PROCESSING_OPTIONS = {
 }
 
 MPI = {
-    "enabled": False,                   # set False to run serial
+    "enabled": True,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
     "n": 128,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
@@ -317,33 +318,34 @@ def apply_slices(src):
     # create a new 'Extract Surface'
     cur = MergeBlocks(Input=src)
     #src.UpdatePipeline()
-    extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=cur)
-    
     (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
     pos   = [(xmax-xmin)/2, (ymax-ymin)/2, (zmax-zmin)/2]
     
-    slice1 = Slice(registrationName='Slice1', Input=extractSurface1)
+    # Apply Slice
+    slice1 = Slice(registrationName='Slice1', Input=cur)
     slice1.SliceType = 'Plane'
     slice1.HyperTreeGridSlicer = 'Plane'
     
     # init the 'Plane' selected for 'SliceType'
     slice1.SliceType.Origin = pos
     slice1.SliceType.Normal = [0.0, 1.0, 0.0]
+    slice1.UpdatePipeline()
+    sliceShow = Show(slice1)
+    sliceShow.Representation = 'Outline'
     
+    extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=slice1)
+
     # create a new 'Redistribute DataSet'
-    redistributeDataSet1 = RedistributeDataSet(registrationName='RedistributeDataSet1', Input=slice1)
+    redistributeDataSet1 = RedistributeDataSet(registrationName='RedistributeDataSet1', Input=extractSurface1)
     redistributeDataSet1.NumberOfPartitions = 0
     redistributeDataSet1.GenerateGlobalCellIds = 1
     
     redistributeDataSet1.UpdatePipeline()
-    sliceShow = Show(slice1)
-    sliceShow.Representation = 'Outline'
-    
     DataShow = Show(redistributeDataSet1)
     DataShow.Representation = 'Feature Edges'
     
     # create a new 'Annotate Time Filter'
-    annotateTimeFilter1 = AnnotateTimeFilter(registrationName='AnnotateTimeFilter1', Input=slice1)
+    annotateTimeFilter1 = AnnotateTimeFilter(registrationName='AnnotateTimeFilter1', Input=redistributeDataSet1)
     annotateTimeFilter1.Format = 'Time: {time:.2f}s'
     
     annotateTimeFilter1Display = Show(annotateTimeFilter1)
@@ -427,7 +429,10 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     rz = (b[5] - b[4])
     R = dist_factor * _bi.max(rx, ry, rz, 1e-6)
     
-    xlim = np.arange(b[0], b[1]+1)
+    xx0 = cfg.get("clipping")["Xmin"]
+    xx1 = cfg.get("clipping")["Xmax"]
+    xlim = np.arange(xx0, xx1+1)
+    print("xlim", xlim, xlim.tolist())
     zlim = np.linspace(zmin, zmax, 3)
     
     # For view axes:
@@ -465,7 +470,7 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             view.AxesGrid.XAxisLabels = xlim.tolist()
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
-            view.AxesGrid.ZAxisLabels = zlim.tolist()
+            view.AxesGrid.ZAxisLabels = [np.round(zmin,2), 0 , zmax]
 
     try:
         view.ResetCamera(False)  # keep our orientation, just fit
@@ -1077,13 +1082,22 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
             times = list(getattr(src, "TimestepValues", []) or [])
 
         os.makedirs(folder, exist_ok=True)
+        start_time = cfg.get("start_time")
         if times:
             for t in times:
-                GetAnimationScene().AnimationTime = t
-                view.Update()
-                fname = f"{arr}_t_{_safe_time_str(t)}.png"
-                SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
-                print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+                if start_time is not None:
+                    if t>=start_time:
+                        GetAnimationScene().AnimationTime = t
+                        view.Update()
+                        fname = f"{arr}_t_{_safe_time_str(t)}.png"
+                        SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
+                        print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+                else:
+                    GetAnimationScene().AnimationTime = t
+                    view.Update()
+                    fname = f"{arr}_t_{_safe_time_str(t)}.png"
+                    SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
+                    print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
         else:
             view.Update()
             fname = f"{arr}_t_static.png"
@@ -1096,7 +1110,8 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
     # single vs multiple
     if len(arrays) == 1:
-        _render_one(arrays[0], outdir_root)
+        subdir = os.path.join(outdir_root, str(arrays[0]))
+        _render_one(arrays[0], subdir)
     else:
         for arr in arrays:
             subdir = os.path.join(outdir_root, str(arr))
