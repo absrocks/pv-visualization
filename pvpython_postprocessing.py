@@ -25,14 +25,15 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 20,        # None --> to start from 0
+    'start_time': 0,        # None --> to start from 0
+    'end_time': 6,
 
     # ---- Averaging Options ----
     'averaging': {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': True,      # set False to disable
+        'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 21.0,
         'Xmax': 34.0,
@@ -49,10 +50,10 @@ INPUT_PARAMETERS = {
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'UAvg',                       # REQUIRED: array to visualize
-        'out_array': 'k',
-        'range': [0, 0.2],                      # e.g., [0.0, 5.0]; None = auto
-        'custom_label': None, # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],  # e.g. None
+        'array': 'U',                       # REQUIRED: array to visualize
+        'out_array': 'U',
+        'range': [0, 2],                      # e.g., [0.0, 5.0]; None = auto
+        'custom_label': None, # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.2f',  # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
@@ -71,7 +72,7 @@ PROCESSING_OPTIONS = {
 MPI = {
     "enabled": True,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
-    "n": 128,                            # number of ranks
+    "n": 64,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
 }
 # -------------------------------
@@ -80,6 +81,7 @@ MPI = {
 SCRIPT_CONTENT = r'''
 import sys, os, json, argparse, re
 from paraview.simple import *
+from paraview import servermanager as sm
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 import numpy as np
 import builtins as _bi
@@ -111,20 +113,21 @@ def main():
         
     if cfg.get("visualization")["axis"] is True:
         src= apply_slices(src)
-    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+    
     
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
+    
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
 
     # ---- Decide/compute derived arrays if requested ----
     vis_array = cfg.get("visualization")["array"]
-    print("vis_array", vis_array)
     averaging = cfg.get("averaging")
     default_axis = averaging.get("axis")
     effective_vis_array = vis_array
+    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     
     
     try:
@@ -160,13 +163,115 @@ def main():
     
     # ---- Render & save ----
     try:
-        color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+        print(f"[pvpython-child] Calculated array: {avg_name}")
+        #src, zmax, array_max = print_array_stats(src, avg_name)
+        src = get_coords(src, cfg, base)
+        #effective_vis_array = avg_name
+        #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
 
     print("[pvpython-child] Completed successfully.")
     return 0
+
+def get_coords(src, cfg, array, axis_letter='Y'):
+    """
+    For each timestep in the source, compute spanwise-average of `base_array`,
+    then print bounds at that time. Returns the averaging filter so caller can reuse.
+    """
+    # 0) Gather times
+    tk = GetTimeKeeper()
+    times = list(getattr(tk, "TimestepValues", []) or [])
+    if not times:
+        times = list(getattr(src_base, "TimestepValues", []) or [])
+    if not times:
+        print("[pvpython-child] get_coords: no timesteps found", flush=True)
+        return src
+
+    # Optional window
+    tmin = cfg.get("start_time", None)
+    tmax = cfg.get("end_time", None)
+    print("tmin",tmin, "tmax",tmax)
+    
+    for t in times:
+        if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
+            continue
+        GetAnimationScene().AnimationTime = t
+        try:
+            src.UpdatePipeline(time=t)
+        except Exception:
+            src.UpdatePipeline()
+            
+        xmin, xmax, zmin, zmax, amax = print_array_stats(src, array)
+        # Query bounds on the averaged output (geometry is unchanged by averaging)
+        (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
+        print(f"[pvpython-child] bounds at t={t}: "
+              f"{array} maximum is {array_max:6g}, x[{xmin:.6g} {xmax:.6g}] z[{zmin:.6g} {zmax:.6g}], with "
+              f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
+              flush=True)
+
+    return src
+
+
+def print_array_stats(src, name, sample=5, label=None):
+    """
+    Print where the array lives (POINTS/CELLS), its shape, min/max/mean,
+    and the first few tuples.
+    """
+    
+        # Presence / association on proxy
+    pnames, cnames = list_point_cell_arrays(src)
+    if name in pnames:
+        assoc = 'POINTS'
+    elif name in cnames:
+        assoc = 'CELLS'
+    else:
+        print(f"[stats] '{name}' not found (POINTS={pnames}, CELLS={cnames})")
+        return
+        
+    # Current scene time
+    tk = GetTimeKeeper()
+    cur_t = getattr(tk, "Time", None)
+
+    # Flatten and force execution specifically *at* cur_t
+    flat = MergeBlocks(Input=src)
+    try:
+        flat.UpdatePipeline(time=cur_t)
+    except Exception:
+        flat.UpdatePipeline()
+
+    # Fetch concrete VTK dataset
+    vtkobj = sm.Fetch(flat)
+    if vtkobj is None:
+        print("[stats] Fetch returned None (nothing to inspect).")
+        return
+
+    # Wrap and get array
+    wrap = dsa.WrapDataObject(vtkobj)
+    data = wrap.PointData if assoc == 'POINTS' else wrap.CellData
+    if name not in data.keys():
+        print(f"[stats] '{name}' not present on fetched {assoc} at current time.")
+        return
+    wrap = dsa.WrapDataObject(vtkobj)
+    pts  = wrap.Points
+    if pts is None:
+        raise RuntimeError("get_xyz_coords: dataset has no points.")
+    xyz = np.asarray(pts, dtype=float)
+    
+    # Force a *pure NumPy* view to avoid vtk numpy_interface reducers
+    arr = data[name]
+    np_arr = np.array(arr, dtype=float, copy=False)
+    zmax = np.max(xyz[:,2])
+    zmin = min(xyz[:,2])
+    xmax = max(xyz[:,0])
+    xmin = min(xyz[:,0])
+    amax = np_arr.max()
+    
+    src.UpdatePipeline()
+    
+    return xmin, xmax, zmin, zmax, amax
 
 def resolve_derived_request(name, default_axis='Y'):
     """
@@ -329,7 +434,7 @@ def apply_slices(src):
     # init the 'Plane' selected for 'SliceType'
     slice1.SliceType.Origin = pos
     slice1.SliceType.Normal = [0.0, 1.0, 0.0]
-    slice1.UpdatePipeline()
+    #slice1.UpdatePipeline()
     sliceShow = Show(slice1)
     sliceShow.Representation = 'Outline'
     
@@ -432,7 +537,6 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     xx0 = cfg.get("clipping")["Xmin"]
     xx1 = cfg.get("clipping")["Xmax"]
     xlim = np.arange(xx0, xx1+1)
-    print("xlim", xlim, xlim.tolist())
     zlim = np.linspace(zmin, zmax, 3)
     
     # For view axes:
@@ -1080,13 +1184,13 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         times = list(getattr(tk, "TimestepValues", []) or [])
         if not times:
             times = list(getattr(src, "TimestepValues", []) or [])
-
         os.makedirs(folder, exist_ok=True)
         start_time = cfg.get("start_time")
+        end_time = cfg.get("end_time")
         if times:
             for t in times:
-                if start_time is not None:
-                    if t>=start_time:
+                if (start_time is not None and end_time is not None):
+                    if (start_time <= t <= end_time):
                         GetAnimationScene().AnimationTime = t
                         view.Update()
                         fname = f"{arr}_t_{_safe_time_str(t)}.png"
@@ -1157,13 +1261,26 @@ def run_pvpython_child(script_text: str, files: list, cfg_obj: dict) -> int:
     
     print("[driver] Running:", " ".join(shlex.quote(c) for c in cmd))
     
+    # Ensure unbuffered Python in the child
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
+    
     try:
-        res = subprocess.run(cmd, text=True, capture_output=True, check=False)
-        if res.stdout:
-            print(res.stdout, end="")
-        if res.stderr:
-            print(res.stderr, end="", file=sys.stderr)
-        return res.returncode
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env=env)
+        except FileNotFoundError:
+            # Fallback if 'stdbuf' is not installed
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, env=env)
+        
+        # Stream output as it arrives
+        for line in proc.stdout:
+            print(line, end="")  # already includes newline
+            sys.stdout.flush()
+        
+        proc.wait()
+        return proc.returncode
     finally:
         for p in (script_path, cfg_path):
             try:
