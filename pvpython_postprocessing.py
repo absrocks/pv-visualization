@@ -165,7 +165,7 @@ def main():
     try:
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         print(f"[pvpython-child] Calculated array: {avg_name}")
-        #src, zmax, array_max = print_array_stats(src, avg_name)
+        #src, zmax, array_max = print_array_stats(src, base)
         src = get_coords(src, cfg, avg_name)
         #effective_vis_array = avg_name
         #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
@@ -236,8 +236,8 @@ def print_array_stats(src, name, sample=5, label=None):
     cur_t = getattr(tk, "Time", None)
 
     # Flatten and force execution specifically *at* cur_t
-    flat = MergeBlocks(Input=src)
-    #flat = src
+    #flat = MergeBlocks(Input=src)
+    flat = src
     try:
         flat.UpdatePipeline(time=cur_t)
     except Exception:
@@ -257,7 +257,7 @@ def print_array_stats(src, name, sample=5, label=None):
         return
     available_arrays = [wrap.PointData.GetArrayName(i)
                                for i in range(wrap.PointData.GetNumberOfArrays())]
-    print("av arrays", available_arrays)
+    #print("av arrays", available_arrays)
     pts  = wrap.Points
     if pts is None:
         raise RuntimeError("get_xyz_coords: dataset has no points.")
