@@ -166,7 +166,7 @@ def main():
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         print(f"[pvpython-child] Calculated array: {avg_name}")
         #src, zmax, array_max = print_array_stats(src, avg_name)
-        src = get_coords(src, cfg, base)
+        src = get_coords(src, cfg, avg_name)
         #effective_vis_array = avg_name
         #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
@@ -208,7 +208,7 @@ def get_coords(src, cfg, array, axis_letter='Y'):
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
-              f"{array} maximum is {array_max:6g}, x[{xmin:.6g} {xmax:.6g}] z[{zmin:.6g} {zmax:.6g}], with "
+              f"{array} maximum is {amax:6g}, x[{xmin:.6g} {xmax:.6g}] z[{zmin:.6g} {zmax:.6g}], with "
               f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
               flush=True)
 
@@ -237,6 +237,7 @@ def print_array_stats(src, name, sample=5, label=None):
 
     # Flatten and force execution specifically *at* cur_t
     flat = MergeBlocks(Input=src)
+    #flat = src
     try:
         flat.UpdatePipeline(time=cur_t)
     except Exception:
@@ -254,7 +255,9 @@ def print_array_stats(src, name, sample=5, label=None):
     if name not in data.keys():
         print(f"[stats] '{name}' not present on fetched {assoc} at current time.")
         return
-    wrap = dsa.WrapDataObject(vtkobj)
+    available_arrays = [wrap.PointData.GetArrayName(i)
+                               for i in range(wrap.PointData.GetNumberOfArrays())]
+    print("av arrays", available_arrays)
     pts  = wrap.Points
     if pts is None:
         raise RuntimeError("get_xyz_coords: dataset has no points.")
@@ -263,13 +266,14 @@ def print_array_stats(src, name, sample=5, label=None):
     # Force a *pure NumPy* view to avoid vtk numpy_interface reducers
     arr = data[name]
     np_arr = np.array(arr, dtype=float, copy=False)
+    print("calculating points max")
     zmax = np.max(xyz[:,2])
-    zmin = min(xyz[:,2])
-    xmax = max(xyz[:,0])
-    xmin = min(xyz[:,0])
+    zmin = np.min(xyz[:,2])
+    xmax = np.max(xyz[:,0])
+    xmin = np.min(xyz[:,0])
     amax = np_arr.max()
     
-    src.UpdatePipeline()
+    #src.UpdatePipeline()
     
     return xmin, xmax, zmin, zmax, amax
 
