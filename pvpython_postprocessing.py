@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 0,        # None --> to start from 0
-    'end_time': 6,
+    'start_time': 3,        # None --> to start from 0
+    'end_time': 3.6,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -37,6 +37,9 @@ INPUT_PARAMETERS = {
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 21.0,
         'Xmax': 34.0,
+    },
+    'slice': {
+        'enabled': True,      # set False to disable
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
@@ -83,8 +86,12 @@ import sys, os, json, argparse, re
 from paraview.simple import *
 from paraview import servermanager as sm
 from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
 import numpy as np
 import builtins as _bi
+import vtk
+from vtk import vtkMPI4PyCommunicator
+from mpi4py import MPI
 
 def main():
     args = parse_args()
@@ -112,7 +119,7 @@ def main():
         src = apply_clipping(src, cfg)
         
     if cfg.get("visualization")["axis"] is True:
-        src= apply_slices(src)
+        src = vis_slice_axis(src)
     
     
     # Apply IsoVolume
@@ -163,11 +170,12 @@ def main():
     
     # ---- Render & save ----
     try:
+        #apply_slices(src, axis_letter, loc=None)
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-        print(f"[pvpython-child] Calculated array: {avg_name}")
-        #src, zmax, array_max = print_array_stats(src, base)
-        src = get_coords(src, cfg, avg_name)
-        #effective_vis_array = avg_name
+        if cfg.get("slice")["enabled"] is True:
+            src = apply_slices(src, axis_letter)
+        #print(f"[pvpython-child] Calculated array: {avg_name}")
+        src = get_coords(src, cfg, base)
         #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
@@ -176,7 +184,7 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def get_coords(src, cfg, array, axis_letter='Y'):
+def get_coords(src, cfg, array_name, axis_letter='Y'):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
@@ -194,7 +202,7 @@ def get_coords(src, cfg, array, axis_letter='Y'):
     tmin = cfg.get("start_time", None)
     tmax = cfg.get("end_time", None)
     print("tmin",tmin, "tmax",tmax)
-    
+    pf, bfield = global_max_and_bounds_pf(src, array_name)
     for t in times:
         if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
             continue
@@ -203,80 +211,202 @@ def get_coords(src, cfg, array, axis_letter='Y'):
             src.UpdatePipeline(time=t)
         except Exception:
             src.UpdatePipeline()
-            
-        xmin, xmax, zmin, zmax, amax = print_array_stats(src, array)
+        
+        gbounds = read_global_stats(pf, bfield, time=t)
+        xmin,xmax,ymin,ymax,zmin,zmax,amax = gbounds
+    
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
-              f"{array} maximum is {amax:6g}, x[{xmin:.6g} {xmax:.6g}] z[{zmin:.6g} {zmax:.6g}], with "
+              f"global max({array}) = {amax:.6g} "
+              f"mpi bounds=({xmin:.6g},{xmax:.6g}, {ymin:.6g},{ymax:.6g}, {zmin:.6g},{zmax:.6g})"
               f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
               flush=True)
 
     return src
 
-
-def print_array_stats(src, name, sample=5, label=None):
+def global_max_and_bounds_pf(src, array_name):
     """
-    Print where the array lives (POINTS/CELLS), its shape, min/max/mean,
-    and the first few tuples.
+    Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
+    bounds, storing results in FieldData arrays:
+      - "global_max__<array_name>"  (double, 1-tuple)
+      - "global_bounds"             (double, 1-tuple, 6 components)
+    Returns: (pf_proxy, max_field_name, bounds_field_name)
     """
-    
-        # Presence / association on proxy
+    # Decide association on the proxy
     pnames, cnames = list_point_cell_arrays(src)
-    if name in pnames:
-        assoc = 'POINTS'
-    elif name in cnames:
-        assoc = 'CELLS'
+    if array_name in pnames:
+        assoc = "POINTS"
+    elif array_name in cnames:
+        assoc = "CELLS"
     else:
-        print(f"[stats] '{name}' not found (POINTS={pnames}, CELLS={cnames})")
-        return
-        
-    # Current scene time
-    tk = GetTimeKeeper()
-    cur_t = getattr(tk, "Time", None)
+        raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
+                           f"POINTS={pnames}; CELLS={cnames}")
 
-    # Flatten and force execution specifically *at* cur_t
-    #flat = MergeBlocks(Input=src)
-    flat = src
-    try:
-        flat.UpdatePipeline(time=cur_t)
-    except Exception:
-        flat.UpdatePipeline()
+    PF = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
+from vtkmodules.vtkCommonCore import vtkDoubleArray
+import numpy as np, math
+from vtk import vtkMPI4PyCommunicator
+from mpi4py import MPI
 
-    # Fetch concrete VTK dataset
-    vtkobj = sm.Fetch(flat)
-    if vtkobj is None:
-        print("[stats] Fetch returned None (nothing to inspect).")
-        return
+inp = self.GetInputDataObject(0, 0)
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
 
-    # Wrap and get array
-    wrap = dsa.WrapDataObject(vtkobj)
-    data = wrap.PointData if assoc == 'POINTS' else wrap.CellData
-    if name not in data.keys():
-        print(f"[stats] '{name}' not present on fetched {assoc} at current time.")
-        return
-    available_arrays = [wrap.PointData.GetArrayName(i)
-                               for i in range(wrap.PointData.GetNumberOfArrays())]
-    #print("av arrays", available_arrays)
-    pts  = wrap.Points
-    if pts is None:
-        raise RuntimeError("get_xyz_coords: dataset has no points.")
-    xyz = np.asarray(pts, dtype=float)
+wrap = dsa.WrapDataObject(inp)
+data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
+
+# --- local bounds (VTK's GetBounds covers geometry on this rank) ---
+b = inp.GetBounds()
+if b is None or (b[0] > b[1]) or (b[2] > b[3]) or (b[4] > b[5]):
+    local_bounds = ( math.inf, -math.inf,  math.inf, -math.inf,  math.inf, -math.inf )
+else:
+    local_bounds = tuple(b)
+
+# --- local max of array ---
+if "__ARRAY__" in data.keys():
+    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
     
-    # Force a *pure NumPy* view to avoid vtk numpy_interface reducers
-    arr = data[name]
-    np_arr = np.array(arr, dtype=float, copy=False)
-    print("calculating points max")
-    zmax = np.max(xyz[:,2])
-    zmin = np.min(xyz[:,2])
-    xmax = np.max(xyz[:,0])
-    xmin = np.min(xyz[:,0])
-    amax = np_arr.max()
-    
-    #src.UpdatePipeline()
-    
-    return xmin, xmax, zmin, zmax, amax
+    if A.size == 0:
+        local_max = -math.inf
+    else:
+        if A.ndim == 1:
+            V = A.reshape(-1,1)
+        elif A.ndim == 2:
+            V = A
+        elif A.ndim == 3 and A.shape[1:] == (3,3):
+            V = A.reshape(A.shape[0], 9)
+        else:
+            V = A.reshape(A.shape[0], -1)
+        local_max = float(np.max(V))
+else:
+    local_max = -math.inf
 
+# --- MPI all-reduce ---
+ctrl = vtkMultiProcessController.GetGlobalController()
+comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
+
+if ctrl:
+    #print("local_bounds[0]", local_bounds[0])
+    xmin = comm.allreduce(local_bounds[0], MPI.MIN)
+    xmax = comm.allreduce(local_bounds[1], MPI.MAX)
+    ymin = comm.allreduce(local_bounds[2], MPI.MIN)
+    ymax = comm.allreduce(local_bounds[3], MPI.MAX)
+    zmin = comm.allreduce(local_bounds[4], MPI.MIN)
+    zmax = comm.allreduce(local_bounds[5], MPI.MAX)
+    gmax = comm.allreduce(local_max, MPI.MAX)
+    
+else:
+    xmin,xmax,ymin,ymax,zmin,zmax = local_bounds
+    gmax = local_max
+#print("zmax", zmax, "gmax", gmax)
+# Make non-finite more friendly for downstream formatting
+if not (gmax == gmax and gmax != float("inf") and gmax != float("-inf")):
+    gmax = float("nan")
+
+# --- write FieldData using explicit vtkDoubleArray ---
+fd = out.GetFieldData()
+
+# global max
+
+# global bounds as 1-tuple, 6 components
+abds = vtkDoubleArray()
+abds.SetName("global_bounds")
+abds.SetNumberOfComponents(7)
+abds.SetNumberOfTuples(1)
+abds.SetTuple(0, (xmin,xmax,ymin,ymax,zmin,zmax,gmax))
+fd.RemoveArray(abds.GetName())
+fd.AddArray(abds)
+""".lstrip()
+
+    code = (
+        PF.replace("__ASSOC__", assoc)
+          .replace("__ARRAY__", array_name)
+    ).replace("global_max____ARRAY__", f"global_max__{array_name}")
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = code
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+
+    return pf, "global_bounds"
+
+
+def read_global_stats(pf_proxy, bounds_field_name):
+    """
+    Fetch `pf_proxy` (optionally at `time`) and read:
+      - global max from FieldData[max_field_name]
+      - global bounds from FieldData[bounds_field_name]
+    Returns: (gmax: float|None, bounds: (6-tuple)|None)
+    """
+    from paraview.simple import MergeBlocks
+    from paraview import servermanager as sm
+
+    mb = MergeBlocks(Input=pf_proxy)
+    mb.UpdatePipeline()
+
+    dobj = sm.Fetch(mb)
+    if dobj is None:
+        return None, None
+
+    fd = dobj.GetFieldData()
+    abds = fd.GetArray(bounds_field_name)
+    bounds = None
+
+    if abds is not None:
+        ncomp = abds.GetNumberOfComponents()
+        ntup  = abds.GetNumberOfTuples()
+
+        # Expect at least one tuple
+        if ntup >= 1 and ncomp > 0:
+            bounds = tuple(float(abds.GetComponent(0, i)) for i in range(ncomp))
+        else:
+            bounds = None
+    else:
+        print("Bounds cannot be found")
+
+    return bounds
+
+def apply_slices(src, axis_letter, loc=None):
+
+    (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
+    pos   = [(xmax-xmin)/2, (ymax-ymin)/2, (zmax-zmin)/2]
+    
+    # Apply Slice
+    slice1 = Slice(registrationName='Slice1', Input=src)
+    slice1.SliceType = 'Plane'
+    slice1.HyperTreeGridSlicer = 'Plane'
+    
+    if axis_letter=='Y':
+        # init the 'Plane' selected for 'SliceType'
+        if 'None' not in loc:
+            pos[1] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [0.0, 1.0, 0.0]
+    
+    if 'X' in axis_letter:
+        # init the 'Plane' selected for 'SliceType'
+        if 'None' not in loc:
+            pos[0] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [1.0, 0.0, 0.0]
+    
+    if axis_letter=='Z':
+        # init the 'Plane' selected for 'SliceType'
+        if 'None' not in loc:
+            pos[2] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [0.0, 0.0, 1.0]
+    
+    src = slice1
+    src.UpdatePipeline()
+    
+    return src
+    
 def resolve_derived_request(name, default_axis='Y'):
     """
     Accept 'U_avg', 'U_avg_Y', 'U_prime', 'U_prime_Z'.
@@ -422,7 +552,7 @@ def _domain_bounds(src):
         raise RuntimeError("Cannot get dataset bounds for clipping.")
     return b  # (xmin,xmax, ymin,ymax, zmin,zmax)
 
-def apply_slices(src):
+def vis_slice_axis(src, axis_letter, loc=None):
 
     # create a new 'Extract Surface'
     cur = MergeBlocks(Input=src)
@@ -435,10 +565,27 @@ def apply_slices(src):
     slice1.SliceType = 'Plane'
     slice1.HyperTreeGridSlicer = 'Plane'
     
-    # init the 'Plane' selected for 'SliceType'
-    slice1.SliceType.Origin = pos
-    slice1.SliceType.Normal = [0.0, 1.0, 0.0]
-    #slice1.UpdatePipeline()
+    if axis_letter == 'Y':
+        # init the 'Plane' selected for 'SliceType'
+        if 'None' not in loc:
+            pos[1] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [0.0, 1.0, 0.0]
+     
+    if axis_letter == 'X':
+        # init the 'Plane' selected for 'SliceType'
+        if loc is not 'None':
+            pos[0] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [1.0, 0.0, 0.0]
+    
+    if axis_letter == 'Z':
+        # init the 'Plane' selected for 'SliceType'
+        if loc is not 'None':
+            pos[2] = loc
+        slice1.SliceType.Origin = pos
+        slice1.SliceType.Normal = [0.0, 0.0, 1.0]
+        
     sliceShow = Show(slice1)
     sliceShow.Representation = 'Outline'
     
@@ -471,6 +618,8 @@ def apply_slices(src):
             annotateTimeFilter1Display.FontSize = 24
         except Exception:
             raise RuntimeError("Couldn't set the Time Filter Option")
+            
+    src.UpdatePipeline()
     
     return src
     
@@ -740,6 +889,7 @@ if name not in pd.keys():
     raise RuntimeError("Array '%s' not found in PointData." % name)
 
 data = np.asarray(pd[name])
+
 if data.ndim == 1:
     data = data.reshape(-1, 1)
 elif data.ndim == 2:
