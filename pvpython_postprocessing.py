@@ -39,7 +39,7 @@ INPUT_PARAMETERS = {
         'Xmax': 34.0,
     },
     'slice': {
-        'enabled': True,      # set False to disable
+        'enabled': False,      # set False to disable
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
@@ -61,7 +61,7 @@ INPUT_PARAMETERS = {
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
-        'axis': True,
+        'axis': False,
     },
     
 }
@@ -119,7 +119,7 @@ def main():
         src = apply_clipping(src, cfg)
         
     if cfg.get("visualization")["axis"] is True:
-        src = vis_slice_axis(src)
+        src= apply_slices(src, axis_letter)
     
     
     # Apply IsoVolume
@@ -175,7 +175,9 @@ def main():
         if cfg.get("slice")["enabled"] is True:
             src = apply_slices(src, axis_letter)
         #print(f"[pvpython-child] Calculated array: {avg_name}")
-        src = get_coords(src, cfg, base)
+        #src, zmax, array_max = print_array_stats(src, base)
+        src = get_coords(src, cfg, base, axis_letter)
+        #effective_vis_array = avg_name
         #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
@@ -211,10 +213,10 @@ def get_coords(src, cfg, array_name, axis_letter='Y'):
             src.UpdatePipeline(time=t)
         except Exception:
             src.UpdatePipeline()
-        
+            
         gbounds = read_global_stats(pf, bfield, time=t)
         xmin,xmax,ymin,ymax,zmin,zmax,amax = gbounds
-    
+        
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
@@ -336,7 +338,7 @@ fd.AddArray(abds)
     return pf, "global_bounds"
 
 
-def read_global_stats(pf_proxy, bounds_field_name):
+def read_global_stats(pf_proxy, bounds_field_name, time=None):
     """
     Fetch `pf_proxy` (optionally at `time`) and read:
       - global max from FieldData[max_field_name]
@@ -347,7 +349,10 @@ def read_global_stats(pf_proxy, bounds_field_name):
     from paraview import servermanager as sm
 
     mb = MergeBlocks(Input=pf_proxy)
-    mb.UpdatePipeline()
+    try:
+        mb.UpdatePipeline(time=time)
+    except Exception:
+        mb.UpdatePipeline()
 
     dobj = sm.Fetch(mb)
     if dobj is None:
@@ -366,8 +371,7 @@ def read_global_stats(pf_proxy, bounds_field_name):
             bounds = tuple(float(abds.GetComponent(0, i)) for i in range(ncomp))
         else:
             bounds = None
-    else:
-        print("Bounds cannot be found")
+    
 
     return bounds
 
@@ -381,23 +385,23 @@ def apply_slices(src, axis_letter, loc=None):
     slice1.SliceType = 'Plane'
     slice1.HyperTreeGridSlicer = 'Plane'
     
-    if axis_letter=='Y':
+    if axis_letter == 'Y':
         # init the 'Plane' selected for 'SliceType'
-        if 'None' not in loc:
+        if loc is not None:
             pos[1] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 1.0, 0.0]
-    
-    if 'X' in axis_letter:
+     
+    if axis_letter == 'X':
         # init the 'Plane' selected for 'SliceType'
-        if 'None' not in loc:
+        if loc is not None:
             pos[0] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [1.0, 0.0, 0.0]
     
-    if axis_letter=='Z':
+    if axis_letter == 'Z':
         # init the 'Plane' selected for 'SliceType'
-        if 'None' not in loc:
+        if loc is not None:
             pos[2] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 0.0, 1.0]
@@ -567,21 +571,21 @@ def vis_slice_axis(src, axis_letter, loc=None):
     
     if axis_letter == 'Y':
         # init the 'Plane' selected for 'SliceType'
-        if 'None' not in loc:
+        if loc is not None:
             pos[1] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 1.0, 0.0]
      
     if axis_letter == 'X':
         # init the 'Plane' selected for 'SliceType'
-        if loc is not 'None':
+        if loc is not None:
             pos[0] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [1.0, 0.0, 0.0]
     
     if axis_letter == 'Z':
         # init the 'Plane' selected for 'SliceType'
-        if loc is not 'None':
+        if loc is not None:
             pos[2] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 0.0, 1.0]
