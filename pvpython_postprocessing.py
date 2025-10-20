@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 3,        # None --> to start from 0
-    'end_time': 3.6,
+    'start_time': 6,        # None --> to start from 0
+    'end_time': 12,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -36,10 +36,10 @@ INPUT_PARAMETERS = {
         'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 21.0,
-        'Xmax': 34.0,
+        'Xmax': 30.0,
     },
     'slice': {
-        'enabled': False,      # set False to disable
+        'enabled': True,      # set False to disable
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
@@ -75,7 +75,7 @@ PROCESSING_OPTIONS = {
 MPI = {
     "enabled": True,                   # set False to run serial
     "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
-    "n": 64,                            # number of ranks
+    "n": 16,                            # number of ranks
     "extra_args": []                   # e.g. ["--bind-to","core"]
 }
 # -------------------------------
@@ -110,36 +110,36 @@ def main():
     info = src.GetDataInformation()
     npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
     print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
-
+    
+    vis_array = cfg.get("visualization")["array"]
+    averaging = cfg.get("averaging")
+    axis_letter = averaging.get("axis")
+    effective_vis_array = vis_array
+    
     if npts == 0:
         print("ERROR: No data points found", file=sys.stderr)
         return 4
-
+    
     if cfg.get("clipping")["enabled"] is True:
         src = apply_clipping(src, cfg)
         
     if cfg.get("visualization")["axis"] is True:
         src= apply_slices(src, axis_letter)
-    
-    
+      
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
-    
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
 
     # ---- Decide/compute derived arrays if requested ----
-    vis_array = cfg.get("visualization")["array"]
-    averaging = cfg.get("averaging")
-    default_axis = averaging.get("axis")
-    effective_vis_array = vis_array
+    
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     
     
     try:
         base = vis_array
-        axis_letter = default_axis
+        
         # Compute average
         
         if 'k' in cfg.get("visualization")["out_array"]:
@@ -170,13 +170,11 @@ def main():
     
     # ---- Render & save ----
     try:
-        #apply_slices(src, axis_letter, loc=None)
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         if cfg.get("slice")["enabled"] is True:
             src = apply_slices(src, axis_letter)
         #print(f"[pvpython-child] Calculated array: {avg_name}")
-        #src, zmax, array_max = print_array_stats(src, base)
-        src = get_coords(src, cfg, base, axis_letter)
+        src = get_coords(src, cfg, base)
         #effective_vis_array = avg_name
         #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
@@ -186,7 +184,7 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def get_coords(src, cfg, array_name, axis_letter='Y'):
+def get_coords(src, cfg, array_name):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
@@ -204,8 +202,10 @@ def get_coords(src, cfg, array_name, axis_letter='Y'):
     tmin = cfg.get("start_time", None)
     tmax = cfg.get("end_time", None)
     print("tmin",tmin, "tmax",tmax)
-    pf, bfield = global_max_and_bounds_pf(src, array_name)
+    print("array_name", array_name)
+    xz_max = 1
     for t in times:
+        
         if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
             continue
         GetAnimationScene().AnimationTime = t
@@ -213,21 +213,27 @@ def get_coords(src, cfg, array_name, axis_letter='Y'):
             src.UpdatePipeline(time=t)
         except Exception:
             src.UpdatePipeline()
-            
+        pf, bfield = global_max_and_bounds_pf(src, array_name, xz_max, cfg)
         gbounds = read_global_stats(pf, bfield, time=t)
-        xmin,xmax,ymin,ymax,zmin,zmax,amax = gbounds
+        xmin,z1max,zmin,zmax,zz_max,xz_max,amax = gbounds
+        
+        #cfg.get("clipping")["Xmin"] = xz_max
         
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
-              f"global max({array}) = {amax:.6g} "
-              f"mpi bounds=({xmin:.6g},{xmax:.6g}, {ymin:.6g},{ymax:.6g}, {zmin:.6g},{zmax:.6g})"
+              f"global max({array}) = {amax:.6g} \n"
+              f"mpi bounds=({xmin:.6g},{z1max:.6g}, {zmin:.6g},{zmax:.6g}, {zz_max:.6g},{xz_max:.6g}) \n"
               f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
               flush=True)
-
+        
     return src
 
-def global_max_and_bounds_pf(src, array_name):
+def global_max_and_bounds_pf(src, array_name, xmin, cfg):
+    
+    cfg.get("clipping")["Xmin"] = np.floor(xmin) - 0.5
+    src = apply_clipping(src, cfg)
+    
     """
     Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
     bounds, storing results in FieldData arrays:
@@ -253,12 +259,66 @@ import numpy as np, math
 from vtk import vtkMPI4PyCommunicator
 from mpi4py import MPI
 
+# --- MPI ---
+ctrl = vtkMultiProcessController.GetGlobalController()
+comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
+rank = comm.Get_rank()
+
+#print("rank",rank)
+xzmin = float(__XMIN__)
+
 inp = self.GetInputDataObject(0, 0)
+#print("inp",inp)
 out = self.GetOutputDataObject(0)
 out.ShallowCopy(inp)
 
 wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
+points = inp.GetPoints()
+num_points = points.GetNumberOfPoints()
+
+# --- local max of array ---
+if "__ARRAY__" in data.keys():
+    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
+    if A.shape[1] == 3:
+        b = np.sqrt(A[:, 0]**2 + A[:, 1]**2 + A[:, 2]**2)
+        local_max = float(np.max(b))
+    else:
+        raise ValueError(f"Expected shape (n, 3), but got {A.shape}")
+else:
+    raise ValueError(f"__ARRAY__ is not present")
+    
+x1 = []
+z1 = []
+for i in range(num_points):
+    coord = points.GetPoint(i)
+    #x, y1, z = coord[0], coord[1], coord[2]
+    x1.append(coord[0])
+    z1.append(coord[2])
+
+pts = wrap.Points
+xyz = np.asarray(pts, dtype=float)
+
+#x = xyz[:,0]
+#z = xyz[:,2]
+
+x = np.array(x1)
+z = np.array(z1)
+zz_max, xz_max = 0, 0
+
+i_local   = int(np.argmax(z))
+
+z_local   = float(z[i_local])
+x_at_local= float(x[i_local])
+
+pair_local  = np.array([z_local, x_at_local])
+
+pairs_global= comm.allgather(pair_local)
+
+idx = int(np.argmax([p[0] for p in pairs_global]))
+zz_max = float(pairs_global[idx][0])
+xz_max = float(pairs_global[idx][1])
+
 
 # --- local bounds (VTK's GetBounds covers geometry on this rank) ---
 b = inp.GetBounds()
@@ -267,35 +327,11 @@ if b is None or (b[0] > b[1]) or (b[2] > b[3]) or (b[4] > b[5]):
 else:
     local_bounds = tuple(b)
 
-# --- local max of array ---
-if "__ARRAY__" in data.keys():
-    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
-    
-    if A.size == 0:
-        local_max = -math.inf
-    else:
-        if A.ndim == 1:
-            V = A.reshape(-1,1)
-        elif A.ndim == 2:
-            V = A
-        elif A.ndim == 3 and A.shape[1:] == (3,3):
-            V = A.reshape(A.shape[0], 9)
-        else:
-            V = A.reshape(A.shape[0], -1)
-        local_max = float(np.max(V))
-else:
-    local_max = -math.inf
 
-# --- MPI all-reduce ---
-ctrl = vtkMultiProcessController.GetGlobalController()
-comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
 
 if ctrl:
-    #print("local_bounds[0]", local_bounds[0])
     xmin = comm.allreduce(local_bounds[0], MPI.MIN)
     xmax = comm.allreduce(local_bounds[1], MPI.MAX)
-    ymin = comm.allreduce(local_bounds[2], MPI.MIN)
-    ymax = comm.allreduce(local_bounds[3], MPI.MAX)
     zmin = comm.allreduce(local_bounds[4], MPI.MIN)
     zmax = comm.allreduce(local_bounds[5], MPI.MAX)
     gmax = comm.allreduce(local_max, MPI.MAX)
@@ -303,7 +339,7 @@ if ctrl:
 else:
     xmin,xmax,ymin,ymax,zmin,zmax = local_bounds
     gmax = local_max
-#print("zmax", zmax, "gmax", gmax)
+
 # Make non-finite more friendly for downstream formatting
 if not (gmax == gmax and gmax != float("inf") and gmax != float("-inf")):
     gmax = float("nan")
@@ -318,7 +354,7 @@ abds = vtkDoubleArray()
 abds.SetName("global_bounds")
 abds.SetNumberOfComponents(7)
 abds.SetNumberOfTuples(1)
-abds.SetTuple(0, (xmin,xmax,ymin,ymax,zmin,zmax,gmax))
+abds.SetTuple(0, (xmin,xmax,zmin,zmax,zz_max, xz_max, gmax))
 fd.RemoveArray(abds.GetName())
 fd.AddArray(abds)
 """.lstrip()
@@ -326,6 +362,7 @@ fd.AddArray(abds)
     code = (
         PF.replace("__ASSOC__", assoc)
           .replace("__ARRAY__", array_name)
+          .replace("__XMIN__", str(xmin))
     ).replace("global_max____ARRAY__", f"global_max__{array_name}")
 
     pf = ProgrammableFilter(Input=src)
@@ -653,9 +690,11 @@ def apply_clipping(src, cfg):
     # Use domain bounds to span the other two axes
     (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
     
-    pos   = [xmin, ymin, zmin]
-    leng  = [xmax - xmin, ymax - ymin + 1, zmax - zmin + 1]
-
+    pos   = [xmin, ymin-1, zmin-1]
+    if ymax == ymin:
+        leng  = [xmax - xmin, ymax+10, zmax - zmin + 10]
+    else:
+        leng  = [xmax - xmin, ymax - ymin + 5, zmax - zmin + 5]
     i = _axis_index(axis)
     pos[i]  = amin
     leng[i] = amax - amin
