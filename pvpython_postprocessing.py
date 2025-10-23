@@ -36,7 +36,7 @@ INPUT_PARAMETERS = {
         'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 21.0,
-        'Xmax': 30.0,
+        'Xmax': 35.0,
     },
     'slice': {
         'enabled': True,      # set False to disable
@@ -53,15 +53,15 @@ INPUT_PARAMETERS = {
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'U',                       # REQUIRED: array to visualize
-        'out_array': 'U',
+        'array': 'UAvg',                       # REQUIRED: array to visualize
+        'out_array': 'energy',
         'range': [0, 2],                      # e.g., [0.0, 5.0]; None = auto
         'custom_label': None, # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.2f',  # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
-        'axis': False,
+        'show_axis': False,
     },
     
 }
@@ -123,8 +123,8 @@ def main():
     if cfg.get("clipping")["enabled"] is True:
         src = apply_clipping(src, cfg)
         
-    if cfg.get("visualization")["axis"] is True:
-        src= apply_slices(src, axis_letter)
+    if cfg.get("visualization")["show_axis"] is True:
+        src = vis_slice_axis(src, axis_letter)
       
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
@@ -150,7 +150,7 @@ def main():
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
             effective_vis_array = k_name
-            print(f"[pvpython-child] Added array: {k_name}")
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
         
         if 'eps' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Epsilon output will be written")
@@ -162,7 +162,25 @@ def main():
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
             effective_vis_array = eps_name
-            print(f"[pvpython-child] Added array: {eps_name}")
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
+        
+        if 'energy' in cfg.get("visualization")["out_array"]:
+            print(f"[pvpython-child] Energy output will be written")
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"[pvpython-child] Calculated array: {avg_name}")
+            prime_name = f"{base}_prime_{axis_letter}"
+            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            print(f"[pvpython-child] Calculated array: {prime_name}")
+            src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
+            print(f"[pvpython-child] Calculated array: {k_name}")
+            src, grad_name = apply_gradient(src, prime_name)
+            print(f"[pvpython-child] Calculated array: {grad_name}")
+            src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
+            print(f"[pvpython-child] Calculated array: {S2_name}")
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
+            print(f"[pvpython-child] Calculated array: {eps_name}")
+            effective_vis_array = [k_name, eps_name, "U"]
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
@@ -170,13 +188,13 @@ def main():
     
     # ---- Render & save ----
     try:
-        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+        #src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         if cfg.get("slice")["enabled"] is True:
             src = apply_slices(src, axis_letter)
-        #print(f"[pvpython-child] Calculated array: {avg_name}")
-        src = get_coords(src, cfg, base)
-        #effective_vis_array = avg_name
-        #color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+        if 'energy' in cfg.get("visualization")["out_array"]:    
+            src = get_coords(src, cfg, effective_vis_array)
+        else:
+            color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
@@ -213,23 +231,22 @@ def get_coords(src, cfg, array_name):
             src.UpdatePipeline(time=t)
         except Exception:
             src.UpdatePipeline()
-        pf, bfield = global_max_and_bounds_pf(src, array_name, xz_max, cfg)
-        gbounds = read_global_stats(pf, bfield, time=t)
-        xmin,z1max,zmin,zmax,zz_max,xz_max,amax = gbounds
-        
-        #cfg.get("clipping")["Xmin"] = xz_max
+        src, bfield = global_max_and_bounds_pf(src, xz_max, cfg)
+        gbounds = read_global_stats(src, bfield, time=t)
+        zmin,zmax,zz_max,xz_max = gbounds
+        src, efield = calculate_energy(src, array_name, xz_max, cfg)
+        KE, PE, total = read_global_stats(src, efield, time=t)
         
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
-              f"global max({array}) = {amax:.6g} \n"
-              f"mpi bounds=({xmin:.6g},{z1max:.6g}, {zmin:.6g},{zmax:.6g}, {zz_max:.6g},{xz_max:.6g}) \n"
+              f"Energy({array}) = KE:{KE:.6g}, PE:{KE:.6g}, Total Energy:{total:.6g} \n"
               f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
               flush=True)
         
     return src
 
-def global_max_and_bounds_pf(src, array_name, xmin, cfg):
+def global_max_and_bounds_pf(src, xmin, cfg):
     
     cfg.get("clipping")["Xmin"] = np.floor(xmin) - 0.5
     src = apply_clipping(src, cfg)
@@ -241,15 +258,6 @@ def global_max_and_bounds_pf(src, array_name, xmin, cfg):
       - "global_bounds"             (double, 1-tuple, 6 components)
     Returns: (pf_proxy, max_field_name, bounds_field_name)
     """
-    # Decide association on the proxy
-    pnames, cnames = list_point_cell_arrays(src)
-    if array_name in pnames:
-        assoc = "POINTS"
-    elif array_name in cnames:
-        assoc = "CELLS"
-    else:
-        raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
-                           f"POINTS={pnames}; CELLS={cnames}")
 
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
@@ -264,11 +272,10 @@ ctrl = vtkMultiProcessController.GetGlobalController()
 comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
 rank = comm.Get_rank()
 
-#print("rank",rank)
 xzmin = float(__XMIN__)
 
 inp = self.GetInputDataObject(0, 0)
-#print("inp",inp)
+
 out = self.GetOutputDataObject(0)
 out.ShallowCopy(inp)
 
@@ -277,30 +284,18 @@ data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
 
-# --- local max of array ---
-if "__ARRAY__" in data.keys():
-    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
-    if A.shape[1] == 3:
-        b = np.sqrt(A[:, 0]**2 + A[:, 1]**2 + A[:, 2]**2)
-        local_max = float(np.max(b))
-    else:
-        raise ValueError(f"Expected shape (n, 3), but got {A.shape}")
-else:
-    raise ValueError(f"__ARRAY__ is not present")
     
 x1 = []
 z1 = []
 for i in range(num_points):
     coord = points.GetPoint(i)
-    #x, y1, z = coord[0], coord[1], coord[2]
     x1.append(coord[0])
     z1.append(coord[2])
 
 pts = wrap.Points
 xyz = np.asarray(pts, dtype=float)
 
-#x = xyz[:,0]
-#z = xyz[:,2]
+
 
 x = np.array(x1)
 z = np.array(z1)
@@ -320,29 +315,15 @@ zz_max = float(pairs_global[idx][0])
 xz_max = float(pairs_global[idx][1])
 
 
-# --- local bounds (VTK's GetBounds covers geometry on this rank) ---
-b = inp.GetBounds()
-if b is None or (b[0] > b[1]) or (b[2] > b[3]) or (b[4] > b[5]):
-    local_bounds = ( math.inf, -math.inf,  math.inf, -math.inf,  math.inf, -math.inf )
-else:
-    local_bounds = tuple(b)
-
-
-
 if ctrl:
-    xmin = comm.allreduce(local_bounds[0], MPI.MIN)
-    xmax = comm.allreduce(local_bounds[1], MPI.MAX)
     zmin = comm.allreduce(local_bounds[4], MPI.MIN)
     zmax = comm.allreduce(local_bounds[5], MPI.MAX)
-    gmax = comm.allreduce(local_max, MPI.MAX)
     
 else:
-    xmin,xmax,ymin,ymax,zmin,zmax = local_bounds
-    gmax = local_max
+    zmin = local_bounds[4]
+    zmax = local_bounds[5]
 
-# Make non-finite more friendly for downstream formatting
-if not (gmax == gmax and gmax != float("inf") and gmax != float("-inf")):
-    gmax = float("nan")
+
 
 # --- write FieldData using explicit vtkDoubleArray ---
 fd = out.GetFieldData()
@@ -354,14 +335,13 @@ abds = vtkDoubleArray()
 abds.SetName("global_bounds")
 abds.SetNumberOfComponents(7)
 abds.SetNumberOfTuples(1)
-abds.SetTuple(0, (xmin,xmax,zmin,zmax,zz_max, xz_max, gmax))
+abds.SetTuple(0, (zmin,zmax,zz_max, xz_max))
 fd.RemoveArray(abds.GetName())
 fd.AddArray(abds)
 """.lstrip()
 
     code = (
         PF.replace("__ASSOC__", assoc)
-          .replace("__ARRAY__", array_name)
           .replace("__XMIN__", str(xmin))
     ).replace("global_max____ARRAY__", f"global_max__{array_name}")
 
@@ -375,8 +355,8 @@ fd.AddArray(abds)
     return pf, "global_bounds"
     
 def calculate_energy(src, array_name, xslice, cfg):
-    cfg.get("clipping")["Xmin"] = np.floor(xmin) - 0.5
-    src = apply_slices(src, 'X', loc=xslice):
+
+    src = apply_slices(src, 'X', loc=xslice)
     
     """
     Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
@@ -394,7 +374,7 @@ def calculate_energy(src, array_name, xslice, cfg):
     else:
         raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
                            f"POINTS={pnames}; CELLS={cnames}")
-PF = r"""
+    PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
 from vtkmodules.vtkCommonCore import vtkDoubleArray
@@ -418,13 +398,22 @@ num_points = points.GetNumberOfPoints()
 
 # --- local max of array ---
 if "__ARRAY__" in data.keys():
-    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
-    if A.shape[1] == 3:
-        b = np.sqrt(A[:, 0]**2 + A[:, 1]**2 + A[:, 2]**2)
+    names = [name] if isinstance(name, str) else name
+
+# Check and dynamically assign
+for n in names:
+    if n not in pd.keys():
+        raise RuntimeError("Array '%s' not found in PointData." % n)
     else:
-        raise ValueError(f"Expected shape (n, 3), but got {A.shape}")
+        globals()[n] = np.asarray(pd[n]) 
+
+try:        
+    if U.shape[1] == 3:
+        U_mag = np.sqrt(U[:, 0]**2 + U[:, 1]**2 + U[:, 2]**2)
+    else:
+        raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
 else:
-    raise ValueError(f"__ARRAY__ is not present")
+    raise ValueError(f"U is not present")
 
 
 pts = wrap.Points
@@ -432,39 +421,23 @@ xyz = np.asarray(pts, dtype=float)
 z = xyz[:,2]
 
 z_global = comm.allgather(z)
-b_global = comm.allgather(b)
+U_global = comm.allgather(U_mag)
 
 zindex = np.where(z>=0)
 z = z_global[zindex]
-b = b_global[zindex]
+u_mag = U_global[zindex]
 
 idx = np.argsort(z) 
 z_global = z[idx] 
-b_global = b[idx]
+u_global = u_mag[idx]
 
-KE = 0.5 * np.trapz(b_global**2, z_global) / np.max(z_global)
-PE = 9.81 * np.max(z_global)
-# --- local bounds (VTK's GetBounds covers geometry on this rank) ---
-b = inp.GetBounds()
-if b is None or (b[0] > b[1]) or (b[2] > b[3]) or (b[4] > b[5]):
-    local_bounds = ( math.inf, -math.inf,  math.inf, -math.inf,  math.inf, -math.inf )
-else:
-    local_bounds = tuple(b)
+KE = 0.5 * np.trapz(u_global**2, z_global) 
+PE = 9.81 * np.trapz(z_global, z_global)
+TKE = np.trapz(TKE, z_global)
+epsilon = np.trapz(eps*3, z_global)
 
-if ctrl:
-    xmin = comm.allreduce(local_bounds[0], MPI.MIN)
-    xmax = comm.allreduce(local_bounds[1], MPI.MAX)
-    zmin = comm.allreduce(local_bounds[4], MPI.MIN)
-    zmax = comm.allreduce(local_bounds[5], MPI.MAX)
-    gmax = comm.allreduce(local_max, MPI.MAX)
-    
-else:
-    xmin,xmax,ymin,ymax,zmin,zmax = local_bounds
-    gmax = local_max
+total_energy = KE + PE + TKE + epsilon
 
-# Make non-finite more friendly for downstream formatting
-if not (gmax == gmax and gmax != float("inf") and gmax != float("-inf")):
-    gmax = float("nan")
 
 # --- write FieldData using explicit vtkDoubleArray ---
 fd = out.GetFieldData()
@@ -476,7 +449,7 @@ abds = vtkDoubleArray()
 abds.SetName("Energy")
 abds.SetNumberOfComponents(3)
 abds.SetNumberOfTuples(1)
-abds.SetTuple(0, (xmin,xmax,zmin,zmax,zz_max, xz_max, gmax))
+abds.SetTuple(0, (KE, PE, total_energy))
 fd.RemoveArray(abds.GetName())
 fd.AddArray(abds)
 """.lstrip()
