@@ -373,7 +373,129 @@ fd.AddArray(abds)
     pf.UpdatePipeline()
 
     return pf, "global_bounds"
+    
+def calculate_energy(src, array_name, xslice, cfg):
+    cfg.get("clipping")["Xmin"] = np.floor(xmin) - 0.5
+    src = apply_slices(src, 'X', loc=xslice):
+    
+    """
+    Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
+    bounds, storing results in FieldData arrays:
+      - "global_max__<array_name>"  (double, 1-tuple)
+      - "global_bounds"             (double, 1-tuple, 6 components)
+    Returns: (pf_proxy, max_field_name, bounds_field_name)
+    """
+    # Decide association on the proxy
+    pnames, cnames = list_point_cell_arrays(src)
+    if array_name in pnames:
+        assoc = "POINTS"
+    elif array_name in cnames:
+        assoc = "CELLS"
+    else:
+        raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
+                           f"POINTS={pnames}; CELLS={cnames}")
+PF = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
+from vtkmodules.vtkCommonCore import vtkDoubleArray
+import numpy as np, math
+from vtk import vtkMPI4PyCommunicator
+from mpi4py import MPI
 
+# --- MPI ---
+ctrl = vtkMultiProcessController.GetGlobalController()
+comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
+rank = comm.Get_rank()
+
+inp = self.GetInputDataObject(0, 0)
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+
+wrap = dsa.WrapDataObject(inp)
+data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
+points = inp.GetPoints()
+num_points = points.GetNumberOfPoints()
+
+# --- local max of array ---
+if "__ARRAY__" in data.keys():
+    A = np.array(data["__ARRAY__"], dtype=float, copy=False)
+    if A.shape[1] == 3:
+        b = np.sqrt(A[:, 0]**2 + A[:, 1]**2 + A[:, 2]**2)
+    else:
+        raise ValueError(f"Expected shape (n, 3), but got {A.shape}")
+else:
+    raise ValueError(f"__ARRAY__ is not present")
+
+
+pts = wrap.Points
+xyz = np.asarray(pts, dtype=float)
+z = xyz[:,2]
+
+z_global = comm.allgather(z)
+b_global = comm.allgather(b)
+
+zindex = np.where(z>=0)
+z = z_global[zindex]
+b = b_global[zindex]
+
+idx = np.argsort(z) 
+z_global = z[idx] 
+b_global = b[idx]
+
+KE = 0.5 * np.trapz(b_global**2, z_global) / np.max(z_global)
+PE = 9.81 * np.max(z_global)
+# --- local bounds (VTK's GetBounds covers geometry on this rank) ---
+b = inp.GetBounds()
+if b is None or (b[0] > b[1]) or (b[2] > b[3]) or (b[4] > b[5]):
+    local_bounds = ( math.inf, -math.inf,  math.inf, -math.inf,  math.inf, -math.inf )
+else:
+    local_bounds = tuple(b)
+
+if ctrl:
+    xmin = comm.allreduce(local_bounds[0], MPI.MIN)
+    xmax = comm.allreduce(local_bounds[1], MPI.MAX)
+    zmin = comm.allreduce(local_bounds[4], MPI.MIN)
+    zmax = comm.allreduce(local_bounds[5], MPI.MAX)
+    gmax = comm.allreduce(local_max, MPI.MAX)
+    
+else:
+    xmin,xmax,ymin,ymax,zmin,zmax = local_bounds
+    gmax = local_max
+
+# Make non-finite more friendly for downstream formatting
+if not (gmax == gmax and gmax != float("inf") and gmax != float("-inf")):
+    gmax = float("nan")
+
+# --- write FieldData using explicit vtkDoubleArray ---
+fd = out.GetFieldData()
+
+# global max
+
+# global bounds as 1-tuple, 6 components
+abds = vtkDoubleArray()
+abds.SetName("Energy")
+abds.SetNumberOfComponents(3)
+abds.SetNumberOfTuples(1)
+abds.SetTuple(0, (xmin,xmax,zmin,zmax,zz_max, xz_max, gmax))
+fd.RemoveArray(abds.GetName())
+fd.AddArray(abds)
+""".lstrip()
+
+    code = (
+        PF.replace("__ASSOC__", assoc)
+          .replace("__ARRAY__", array_name)
+          .replace("__XMIN__", str(xmin))
+    )
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = code
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+    
+    
+    return pf, "Energy"
 
 def read_global_stats(pf_proxy, bounds_field_name, time=None):
     """
