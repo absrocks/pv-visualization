@@ -176,7 +176,7 @@ def main():
             src, grad_name = apply_gradient(src, prime_name)
             print(f"[pvpython-child] Calculated array: {grad_name}")
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
-            print(f"[pvpython-child] Calculated array: {S2_name}")
+            print(f"[pvpython-child] Calculated array: {s2_name}")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
             print(f"[pvpython-child] Calculated array: {eps_name}")
             effective_vis_array = [k_name, eps_name, "U"]
