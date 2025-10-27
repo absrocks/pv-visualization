@@ -26,25 +26,25 @@ INPUT_PARAMETERS = {
     'output_directory': './out',
     'number_range': None,
     'start_time': 6,        # None --> to start from 0
-    'end_time': 12,
+    'end_time': 20,
 
     # ---- Averaging Options ----
     'averaging': {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': False,      # set False to disable
+        'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 21.0,
-        'Xmax': 35.0,
+        'Xmin': 1.0,
+        'Xmax': 34.0,
     },
     'slice': {
         'enabled': True,      # set False to disable
     },
     # ---- OpenFOAM-specific options ----
     'openfoam': {
-        'mode': 'decomposed',            # 'reconstructed' | 'decomposed' | 'auto'
-        'mesh_regions': ['internalMesh'],   # or [] / None
+        'mode': 'decomposed',                                        # 'reconstructed' | 'decomposed' | 'auto'
+        'mesh_regions': ['internalMesh'],                            # or [] / None
         'cell_arrays':  ['U', 'alpha.water', 'nut', 'UAvg'],         # or [] / None , 'UAvg', 'nut
         'point_arrays': ['U', 'alpha.water', 'nut', 'UAvg'],         # e.g., ['T']
     },
@@ -53,14 +53,14 @@ INPUT_PARAMETERS = {
     'visualization': {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'UAvg',                       # REQUIRED: array to visualize
+        'array': 'UAvg',                    # REQUIRED: array to visualize
         'out_array': 'energy',
-        'range': [0, 2],                      # e.g., [0.0, 5.0]; None = auto
-        'custom_label': None, # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.2f',  # '6.1e' | '6.2f'
+        'range': [0, 0.2],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': None,               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.2f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
-        'camera_plane': 'XZ',    # NEW: 'XZ' | 'XY' | 'YZ'
+        'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
         'show_axis': False,
     },
     
@@ -104,17 +104,14 @@ def main():
     else:
         print(f"[pvpython-child] Loaded: {fname}")
 
-        # Load dataset
+    # Load dataset
     src = pick_reader(fname, cfg)
     pnames, cnames = list_point_cell_arrays(src)
     info = src.GetDataInformation()
     npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
     print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
     
-    vis_array = cfg.get("visualization")["array"]
-    averaging = cfg.get("averaging")
-    axis_letter = averaging.get("axis")
-    effective_vis_array = vis_array
+    
     
     if npts == 0:
         print("ERROR: No data points found", file=sys.stderr)
@@ -122,30 +119,37 @@ def main():
     
     if cfg.get("clipping")["enabled"] is True:
         src = apply_clipping(src, cfg)
-        
+    
+    averaging = cfg.get("averaging")
+    axis_letter = averaging.get("axis")
+    
     if cfg.get("visualization")["show_axis"] is True:
-        src = vis_slice_axis(src, axis_letter)
-      
+        src1 = vis_slice_axis(src, axis_letter)
+        print("Visualization axis is set")
+        
+    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+    
     # Apply IsoVolume
     src = apply_isovolume(src, cfg)
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
-
-    # ---- Decide/compute derived arrays if requested ----
     
-    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+    vis_array = cfg.get("visualization")["array"]
     
+    
+    effective_vis_array = vis_array
     
     try:
         base = vis_array
-        
+        #effective_vis_array = base
+        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+        print(f"[pvpython-child] Calculated array: {avg_name}")
         # Compute average
         
         if 'k' in cfg.get("visualization")["out_array"]:
+            
             print(f"[pvpython-child] TKE output will be written")
-            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-            print(f"[pvpython-child] Calculated array: {avg_name}")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
@@ -154,8 +158,6 @@ def main():
         
         if 'eps' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Epsilon output will be written")
-            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-            print(f"[pvpython-child] Calculated array: {avg_name}")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
             src, grad_name = apply_gradient(src, prime_name)
@@ -163,23 +165,16 @@ def main():
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
             effective_vis_array = eps_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
-        
+            
         if 'energy' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Energy output will be written")
-            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-            print(f"[pvpython-child] Calculated array: {avg_name}")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
-            print(f"[pvpython-child] Calculated array: {prime_name}")
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
-            print(f"[pvpython-child] Calculated array: {k_name}")
             src, grad_name = apply_gradient(src, prime_name)
-            print(f"[pvpython-child] Calculated array: {grad_name}")
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
-            print(f"[pvpython-child] Calculated array: {s2_name}")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
-            print(f"[pvpython-child] Calculated array: {eps_name}")
-            effective_vis_array = [k_name, eps_name, "U"]
+            effective_vis_array = [k_name, eps_name, base]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         
     except Exception as e:
@@ -189,12 +184,13 @@ def main():
     # ---- Render & save ----
     try:
         #src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-        if cfg.get("slice")["enabled"] is True:
-            src = apply_slices(src, axis_letter)
-        if 'energy' in cfg.get("visualization")["out_array"]:    
-            src = get_coords(src, cfg, effective_vis_array)
+        
+        if 'energy' in cfg.get("visualization")["out_array"]:
+            src = energy(src, cfg, axis_letter, effective_vis_array)
         else:
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+          
+        
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
         return 7
@@ -202,7 +198,7 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def get_coords(src, cfg, array_name):
+def energy(src, cfg, axis_letter, base):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
@@ -211,17 +207,14 @@ def get_coords(src, cfg, array_name):
     tk = GetTimeKeeper()
     times = list(getattr(tk, "TimestepValues", []) or [])
     if not times:
-        times = list(getattr(src_base, "TimestepValues", []) or [])
-    if not times:
-        print("[pvpython-child] get_coords: no timesteps found", flush=True)
-        return src
-
+        times = list(getattr(src, "TimestepValues", []) or [])
+    
     # Optional window
     tmin = cfg.get("start_time", None)
     tmax = cfg.get("end_time", None)
     print("tmin",tmin, "tmax",tmax)
-    print("array_name", array_name)
-    xz_max = 1
+    xz_max = cfg.get("clipping")["Xmin"]
+    
     for t in times:
         
         if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
@@ -231,25 +224,30 @@ def get_coords(src, cfg, array_name):
             src.UpdatePipeline(time=t)
         except Exception:
             src.UpdatePipeline()
-        src, bfield = global_max_and_bounds_pf(src, xz_max, cfg)
-        gbounds = read_global_stats(src, bfield, time=t)
-        zmin,zmax,zz_max,xz_max = gbounds
-        src, efield = calculate_energy(src, array_name, xz_max, cfg)
-        KE, PE, total = read_global_stats(src, efield, time=t)
         
+        pf, bfield = global_max_and_bounds_pf(src, xz_max, cfg)
+        gbounds = read_global_stats(pf, bfield, time=t)
+        zz_max,xz_max = gbounds
         # Query bounds on the averaged output (geometry is unchanged by averaging)
-        (xxmin,xxmax,yymin,yymax,zzmin,zzmax) =_domain_bounds(src)
+        (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
         print(f"[pvpython-child] bounds at t={t}: "
-              f"Energy({array}) = KE:{KE:.6g}, PE:{KE:.6g}, Total Energy:{total:.6g} \n"
-              f"bounds {xxmin,xxmax,yymin,yymax,zzmin,zzmax}",
+              f"bounds {zmin,zmax,zz_max,xz_max}",
               flush=True)
         
+        src, efield = calculate_energy(src, xz_max, cfg, desired_array=base)
+        KE, PE, total = read_global_stats(src, efield, time=t)
+        
+        
+        print(f"[pvpython-child] Energy at t={t}: "
+              f"Energy({array}) = KE:{KE:.6g}, PE:{KE:.6g}, Total Energy:{total:.6g}",
+              flush=True)
+        src = apply_clipping(src, cfg, np.floor(xz_max) - 0.5)
     return src
 
 def global_max_and_bounds_pf(src, xmin, cfg):
     
-    cfg.get("clipping")["Xmin"] = np.floor(xmin) - 0.5
-    src = apply_clipping(src, cfg)
+    if cfg.get("slice")["enabled"] is True:
+        src = apply_slices(src, "Y")
     
     """
     Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
@@ -258,7 +256,7 @@ def global_max_and_bounds_pf(src, xmin, cfg):
       - "global_bounds"             (double, 1-tuple, 6 components)
     Returns: (pf_proxy, max_field_name, bounds_field_name)
     """
-
+    assoc = "POINTS"
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
@@ -271,8 +269,6 @@ from mpi4py import MPI
 ctrl = vtkMultiProcessController.GetGlobalController()
 comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
 rank = comm.Get_rank()
-
-xzmin = float(__XMIN__)
 
 inp = self.GetInputDataObject(0, 0)
 
@@ -299,6 +295,8 @@ xyz = np.asarray(pts, dtype=float)
 
 x = np.array(x1)
 z = np.array(z1)
+print("z shape", z.shape)
+ztest = comm.allgather(z)
 zz_max, xz_max = 0, 0
 
 i_local   = int(np.argmax(z))
@@ -314,17 +312,6 @@ idx = int(np.argmax([p[0] for p in pairs_global]))
 zz_max = float(pairs_global[idx][0])
 xz_max = float(pairs_global[idx][1])
 
-
-if ctrl:
-    zmin = comm.allreduce(local_bounds[4], MPI.MIN)
-    zmax = comm.allreduce(local_bounds[5], MPI.MAX)
-    
-else:
-    zmin = local_bounds[4]
-    zmax = local_bounds[5]
-
-
-
 # --- write FieldData using explicit vtkDoubleArray ---
 fd = out.GetFieldData()
 
@@ -333,17 +320,16 @@ fd = out.GetFieldData()
 # global bounds as 1-tuple, 6 components
 abds = vtkDoubleArray()
 abds.SetName("global_bounds")
-abds.SetNumberOfComponents(7)
+abds.SetNumberOfComponents(2)
 abds.SetNumberOfTuples(1)
-abds.SetTuple(0, (zmin,zmax,zz_max, xz_max))
+abds.SetTuple(0, (zz_max, xz_max))
 fd.RemoveArray(abds.GetName())
 fd.AddArray(abds)
 """.lstrip()
 
     code = (
         PF.replace("__ASSOC__", assoc)
-          .replace("__XMIN__", str(xmin))
-    ).replace("global_max____ARRAY__", f"global_max__{array_name}")
+    )
 
     pf = ProgrammableFilter(Input=src)
     pf.Script = code
@@ -354,7 +340,7 @@ fd.AddArray(abds)
 
     return pf, "global_bounds"
     
-def calculate_energy(src, array_name, xslice, cfg):
+def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
 
     src = apply_slices(src, 'X', loc=xslice)
     
@@ -365,15 +351,31 @@ def calculate_energy(src, array_name, xslice, cfg):
       - "global_bounds"             (double, 1-tuple, 6 components)
     Returns: (pf_proxy, max_field_name, bounds_field_name)
     """
+    arrays = []
+    if desired_array is not None:
+        if isinstance(desired_array, (list, tuple, set)):
+            arrays.extend(list(desired_array))
+        else:
+            arrays.append(desired_array)
+    if more_arrays:
+        arrays.extend(list(more_arrays))
+    if not arrays:
+        # fallback to config if nothing explicitly passed
+        raise RuntimeError("No array(s) provided for visualization.")
+        
     # Decide association on the proxy
+    print("arrays", arrays)
+    
     pnames, cnames = list_point_cell_arrays(src)
-    if array_name in pnames:
-        assoc = "POINTS"
-    elif array_name in cnames:
-        assoc = "CELLS"
-    else:
-        raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
-                           f"POINTS={pnames}; CELLS={cnames}")
+    for array_name in arrays:
+        if array_name in pnames:
+            assoc = "POINTS"
+        elif array_name in cnames:
+            assoc = "CELLS"
+        else:
+            raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
+                               f"POINTS={pnames}; CELLS={cnames}")
+    
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
@@ -420,12 +422,12 @@ pts = wrap.Points
 xyz = np.asarray(pts, dtype=float)
 z = xyz[:,2]
 
-z_global = comm.allgather(z)
-U_global = comm.allgather(U_mag)
+#z_global = comm.allgather(z)
+#U_global = comm.allgather(U_mag)
 
-zindex = np.where(z>=0)
-z = z_global[zindex]
-u_mag = U_global[zindex]
+#zindex = np.where(z>=0)
+#z = z_global[zindex]
+#u_mag = U_global[zindex]
 
 idx = np.argsort(z) 
 z_global = z[idx] 
@@ -721,7 +723,8 @@ def vis_slice_axis(src, axis_letter, loc=None):
             pos[2] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 0.0, 1.0]
-        
+    
+    slice1.UpdatePipeline()
     sliceShow = Show(slice1)
     sliceShow.Representation = 'Outline'
     
@@ -755,44 +758,54 @@ def vis_slice_axis(src, axis_letter, loc=None):
         except Exception:
             raise RuntimeError("Couldn't set the Time Filter Option")
             
-    src.UpdatePipeline()
     
     return src
     
-def apply_clipping(src, cfg):
+def apply_clipping(src, axis, xmin=None, xmax=None, ymin=None, ymax=None, zmin=None, zmax=None):
     """
     If cfg['clipping'] is enabled, apply a Box clip:
       - along the requested axis, use [min, max] from config
       - along the other axes, span the whole domain
     Returns the clipped source (Clip filter output).
     """
-    clip_cfg = cfg.get('clipping')
-    axis = clip_cfg.get('axis')
+    
     if axis not in ('X','Y','Z'):
         raise RuntimeError(f"Invalid clipping axis: {axis}")
-
-    # Figure out which keys to read
-    min_key = f"{axis}min"
-    max_key = f"{axis}max"
-    if (min_key not in clip_cfg) or (max_key not in clip_cfg):
-        raise RuntimeError(f"Clipping requires '{min_key}' and '{max_key}' in config.")
-
-    amin = float(clip_cfg[min_key])
-    amax = float(clip_cfg[max_key])
-    if not (amax > amin):
-        raise RuntimeError(f"Clipping {axis} range must have max > min (got {amin}, {amax}).")
+    
 
     # Use domain bounds to span the other two axes
-    (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
+    (dxmin,dxmax,dymin,dymax,dzmin,dzmax) = _domain_bounds(src)
     
-    pos   = [xmin, ymin-1, zmin-1]
-    if ymax == ymin:
-        leng  = [xmax - xmin, ymax+10, zmax - zmin + 10]
-    else:
-        leng  = [xmax - xmin, ymax - ymin + 5, zmax - zmin + 5]
-    i = _axis_index(axis)
-    pos[i]  = amin
-    leng[i] = amax - amin
+    if axis == "X":
+        if xmin is None or xmax is None:
+            raise RuntimeError("xmin and xmax are not defined")
+        elif not (xmax > xmin):
+            raise RuntimeError(f"Clipping {axis} range must have max > min (got {xmin}, {xmax}).")
+        else:
+            pos   = [xmin, dymin-1, dzmin-1]
+            leng  = [xmax - xmin, dymax - dymin + 5, dzmax - dzmin + 5]
+            amin,amax = xmin, xmax
+            
+    elif axis == "Y":
+        if ymin is None or ymax is None:
+            raise RuntimeError("ymin and ymax are not defined")
+        elif not (ymax > ymin):
+            raise RuntimeError(f"Clipping {axis} range must have max > min (got {ymin}, {ymax}).")
+        else:
+            pos   = [dxmin-1, ymin, dzmin-1]
+            leng  = [dxmax - dxmin + 5, ymax - ymin, dzmax - dzmin + 5]
+            amin,amax = ymin, ymax
+            
+    elif axis == "Z":
+        if zmin is None or zmax is None:
+            raise RuntimeError("zmin and zmax are not defined")
+        elif not (zmax > zmin):
+            raise RuntimeError(f"Clipping {axis} range must have max > min (got {zmin}, {zmax}).")
+        else:
+            pos   = [dxmin-1, dymin, zmin-1]
+            leng  = [dxmax - dxmin + 5, dymax - dymin + 5, zmax - zmin]
+            amin,amax = zmin, zmax
+        
 
     # Build a Box clip
     clip1 = Clip(Input=src)
@@ -803,7 +816,7 @@ def apply_clipping(src, cfg):
     clip1.ClipType.Length   = leng
     clip1.UpdatePipeline()
 
-    print(f"[pvpython-child] Applied Box clip on {axis} in [{amin}, {amax}]")
+    print(f"[pvpython-child] Applied Box clip on {axis} from {amin} to {amax}")
     return clip1
 
 def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
@@ -846,22 +859,22 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
         view.CameraPosition = [cx + R, cy, cz]
         view.CameraFocalPoint = [cx, cy, cz]
         view.CameraViewUp = [0, 0, 1]
-    else:
+    elif plane == "XZ":
         # XZ (default) -> look along +Y
         view.CameraPosition = [cx, -cy - R, cz]
         view.CameraFocalPoint = [cx, cy, cz]
         view.CenterOfRotation = [cx, cy, cz]
-        
         view.CameraViewUp = [0, 0, 1]
         view.CameraFocalDisk = 1.0
         view.CameraParallelProjection = 1
-        if cfg.get("visualization")["axis"] is True:
+        if cfg.get("visualization")["show_axis"] is True:
             # Set Axis
             view.AxesGrid.Visibility = 1
             view.AxesGrid.AxesToLabel = 5
             
             # For data axes:
             view.AxesGrid.XAxisUseCustomLabels = 1
+            print("xlim", xlim.tolist())
             view.AxesGrid.XAxisLabels = xlim.tolist()
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
@@ -1448,7 +1461,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         try:
             set_camera_plane(view, src, cfg, zmin, zmax, plane=cam_plane)
         except Exception:
-            pass
+            RuntimeError(f"Cannot set the camera")
 
         ncomp = get_array_components(src, assoc, arr)
         if ncomp and ncomp > 1:
