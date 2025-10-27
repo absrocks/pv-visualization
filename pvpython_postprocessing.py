@@ -111,17 +111,18 @@ def main():
     npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
     print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
     
-    
+    averaging = cfg.get("averaging")
+    axis_letter = averaging.get("axis")
+    vis_array = cfg.get("visualization")["array"]
+    effective_vis_array = vis_array
     
     if npts == 0:
         print("ERROR: No data points found", file=sys.stderr)
         return 4
     
     if cfg.get("clipping")["enabled"] is True:
-        src = apply_clipping(src, cfg)
+        src = apply_clipping(src, cfg.get("clipping")["axis"], xmin=cfg.get("clipping")["Xmin"], xmax=cfg.get("clipping")["Xmax"])
     
-    averaging = cfg.get("averaging")
-    axis_letter = averaging.get("axis")
     
     if cfg.get("visualization")["show_axis"] is True:
         src1 = vis_slice_axis(src, axis_letter)
@@ -135,14 +136,10 @@ def main():
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
     
-    vis_array = cfg.get("visualization")["array"]
     
-    
-    effective_vis_array = vis_array
     
     try:
         base = vis_array
-        #effective_vis_array = base
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         print(f"[pvpython-child] Calculated array: {avg_name}")
         # Compute average
@@ -183,9 +180,9 @@ def main():
     
     # ---- Render & save ----
     try:
-        #src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         
         if 'energy' in cfg.get("visualization")["out_array"]:
+            src = apply_clipping(src, 'Z', zmin=0, zmax=zmax)
             src = energy(src, cfg, axis_letter, effective_vis_array)
         else:
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
@@ -213,7 +210,6 @@ def energy(src, cfg, axis_letter, base):
     tmin = cfg.get("start_time", None)
     tmax = cfg.get("end_time", None)
     print("tmin",tmin, "tmax",tmax)
-    xz_max = cfg.get("clipping")["Xmin"]
     
     for t in times:
         
@@ -225,11 +221,14 @@ def energy(src, cfg, axis_letter, base):
         except Exception:
             src.UpdatePipeline()
         
-        pf, bfield = global_max_and_bounds_pf(src, xz_max, cfg)
-        gbounds = read_global_stats(pf, bfield, time=t)
-        zz_max,xz_max = gbounds
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+        print(f"src bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
+        
+        pf, bfield = global_max_and_bounds_pf(src, cfg)
+        gbounds = read_global_stats(pf, bfield, time=t)
+        zz_max,xz_max = gbounds
+        
         print(f"[pvpython-child] bounds at t={t}: "
               f"bounds {zmin,zmax,zz_max,xz_max}",
               flush=True)
@@ -237,14 +236,13 @@ def energy(src, cfg, axis_letter, base):
         src, efield = calculate_energy(src, xz_max, cfg, desired_array=base)
         KE, PE, total = read_global_stats(src, efield, time=t)
         
-        
         print(f"[pvpython-child] Energy at t={t}: "
               f"Energy({array}) = KE:{KE:.6g}, PE:{KE:.6g}, Total Energy:{total:.6g}",
               flush=True)
-        src = apply_clipping(src, cfg, np.floor(xz_max) - 0.5)
+        #src = apply_clipping(src, cfg, np.floor(xz_max) - 0.5)
     return src
 
-def global_max_and_bounds_pf(src, xmin, cfg):
+def global_max_and_bounds_pf(src, cfg):
     
     if cfg.get("slice")["enabled"] is True:
         src = apply_slices(src, "Y")
@@ -295,7 +293,6 @@ xyz = np.asarray(pts, dtype=float)
 
 x = np.array(x1)
 z = np.array(z1)
-print("z shape", z.shape)
 ztest = comm.allgather(z)
 zz_max, xz_max = 0, 0
 
@@ -341,7 +338,7 @@ fd.AddArray(abds)
     return pf, "global_bounds"
     
 def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
-
+    
     src = apply_slices(src, 'X', loc=xslice)
     
     """
@@ -367,6 +364,7 @@ def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
     print("arrays", arrays)
     
     pnames, cnames = list_point_cell_arrays(src)
+    print(f"pnames, cnames: {pnames}, {cnames}")
     for array_name in arrays:
         if array_name in pnames:
             assoc = "POINTS"
@@ -410,36 +408,32 @@ for n in names:
         globals()[n] = np.asarray(pd[n]) 
 
 try:        
-    if U.shape[1] == 3:
-        U_mag = np.sqrt(U[:, 0]**2 + U[:, 1]**2 + U[:, 2]**2)
+    if UAvg.shape[1] == 3:
+        U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
     else:
         raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
-else:
-    raise ValueError(f"U is not present")
+except:
+    raise ValueError(f"UAvg is not present")
 
 
 pts = wrap.Points
 xyz = np.asarray(pts, dtype=float)
 z = xyz[:,2]
 
-#z_global = comm.allgather(z)
-#U_global = comm.allgather(U_mag)
-
-#zindex = np.where(z>=0)
-#z = z_global[zindex]
-#u_mag = U_global[zindex]
 
 idx = np.argsort(z) 
-z_global = z[idx] 
-u_global = u_mag[idx]
+z_sort = z[idx] 
+u_sort = u_mag[idx]
+tke_sort = TKE[idx]
+eps_sort = epsilon[idx]
 
-KE = 0.5 * np.trapz(u_global**2, z_global) 
-PE = 9.81 * np.trapz(z_global, z_global)
-TKE = np.trapz(TKE, z_global)
-epsilon = np.trapz(eps*3, z_global)
+KE = 0.5 * np.trapz(u_sort**2, z_sort) 
+PE = 9.81 * np.trapz(z_sort, z_sort)
+TKE = np.trapz(tke_sort, z_sort)
+epsilon = np.trapz(eps_sort*3, z_sort)
 
-total_energy = KE + PE + TKE + epsilon
-
+energy = KE + PE + TKE + epsilon
+total_energy = comm.allreduce(energy, MPI.SUM)
 
 # --- write FieldData using explicit vtkDoubleArray ---
 fd = out.GetFieldData()
@@ -459,7 +453,6 @@ fd.AddArray(abds)
     code = (
         PF.replace("__ASSOC__", assoc)
           .replace("__ARRAY__", array_name)
-          .replace("__XMIN__", str(xmin))
     )
 
     pf = ProgrammableFilter(Input=src)
@@ -802,9 +795,9 @@ def apply_clipping(src, axis, xmin=None, xmax=None, ymin=None, ymax=None, zmin=N
         elif not (zmax > zmin):
             raise RuntimeError(f"Clipping {axis} range must have max > min (got {zmin}, {zmax}).")
         else:
-            pos   = [dxmin-1, dymin, zmin-1]
+            pos   = [dxmin-1, dymin-1, zmin]
             leng  = [dxmax - dxmin + 5, dymax - dymin + 5, zmax - zmin]
-            amin,amax = zmin, zmax
+            amin, amax = zmin, zmax
         
 
     # Build a Box clip
@@ -874,7 +867,6 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             
             # For data axes:
             view.AxesGrid.XAxisUseCustomLabels = 1
-            print("xlim", xlim.tolist())
             view.AxesGrid.XAxisLabels = xlim.tolist()
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
