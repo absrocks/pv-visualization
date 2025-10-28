@@ -395,11 +395,12 @@ wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
-
+print(f"ARRAy is :{__ARRAY__}")
 # --- local max of array ---
 if "__ARRAY__" in data.keys():
+    name = data["__ARRAY__"]
     names = [name] if isinstance(name, str) else name
-
+print(f"ARRAy is :{__ARRAY__}, names : {names}")
 # Check and dynamically assign
 for n in names:
     if n not in pd.keys():
@@ -452,7 +453,7 @@ fd.AddArray(abds)
 
     code = (
         PF.replace("__ASSOC__", assoc)
-          .replace("__ARRAY__", array_name)
+          .replace("__ARRAY__", arrays)
     )
 
     pf = ProgrammableFilter(Input=src)
