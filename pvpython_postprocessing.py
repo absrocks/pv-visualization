@@ -375,7 +375,6 @@ def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
             raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
                                f"POINTS={pnames}; CELLS={cnames}")
     
-    print("TKE,epsilon,UAvg", TKE,epsilon,UAvg)
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
