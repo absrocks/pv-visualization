@@ -171,7 +171,7 @@ def main():
             src, grad_name = apply_gradient(src, prime_name)
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
-            effective_vis_array = [k_name, eps_name]
+            effective_vis_array = [k_name, eps_name, avg_name]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         
     except Exception as e:
@@ -193,7 +193,7 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def energy(src, cfg, axis_letter, effective_vis_array, base):
+def energy(src, cfg, axis_letter, effective_vis_array):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
@@ -231,7 +231,7 @@ def energy(src, cfg, axis_letter, effective_vis_array, base):
               f"bounds {zmin,zmax,zz_max,xz_max}",
               flush=True)
         
-        src, efield = calculate_energy(src, xz_max, cfg,  base, desired_array=effective_vis_array)
+        src, efield = calculate_energy(src, xz_max, cfg, desired_array=effective_vis_array)
         KE, PE, total = read_global_stats(src, efield, time=t)
         
         print(f"[pvpython-child] Energy at t={t}: "
@@ -335,7 +335,7 @@ fd.AddArray(abds)
 
     return pf, "global_bounds"
     
-def calculate_energy(src, xslice, cfg, base, desired_array=None, *more_arrays):
+def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
     
     src = apply_slices(src, 'X', loc=xslice)
     
@@ -397,8 +397,8 @@ num_points = points.GetNumberOfPoints()
 AA = "__UAvg__"
 BB = "__TKE__"
 #print("UAvg, TKE", data[AA], data[BB])
-print("TKE", np.asarray(data[BB]))
-#print("UAvg", np.asarray(data[AA]))
+#print("TKE", np.asarray(data[BB]))
+print("UAvg", np.asarray(data[AA]))
 
 try:
     if "__TKE__" in data.keys():
@@ -456,7 +456,7 @@ fd.AddArray(abds)
         PF.replace("__ASSOC__", assoc)
           .replace("__TKE__", TKE)
           .replace("__epsilon__", epsilon)
-          .replace("__UAvg__", base)
+          .replace("__UAvg__", avg_name)
     )
 
     pf = ProgrammableFilter(Input=src)
