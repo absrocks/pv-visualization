@@ -361,7 +361,7 @@ def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
         raise RuntimeError("No array(s) provided for visualization.")
         
     # Decide association on the proxy
-    #print("arrays", arrays)
+    print("arrays", arrays)
     pnames, cnames = list_point_cell_arrays(src)
     
     for array_name in arrays:
@@ -375,7 +375,7 @@ def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
             raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
                                f"POINTS={pnames}; CELLS={cnames}")
     
-    
+    print("TKE,epsilon,UAvg", TKE,epsilon,UAvg)
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
 from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
@@ -397,7 +397,8 @@ wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
-
+AA = "__UAvg__"
+print("UAvg", AA)
 try:
     if "__TKE__" in data.keys():
         TKE = np.asarray(data["__TKE__"])
@@ -405,6 +406,7 @@ try:
         epsilon = np.asarray(data["__epsilon__"])
     if "__UAvg__" in data.keys():
         UAvg = np.asarray(data["__UAvg__"])
+        
 except:
     raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
 
