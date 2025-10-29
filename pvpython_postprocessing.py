@@ -396,7 +396,7 @@ points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
 AA = "__UAvg__"
 BB = "__TKE__"
-print("UAvg, TKE", data[AA], data[BB])
+#print("UAvg, TKE", data[AA], data[BB])
 print("TKE", np.asarray(data[BB]))
 #print("UAvg", np.asarray(data[AA]))
 
