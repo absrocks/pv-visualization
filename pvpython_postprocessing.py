@@ -397,7 +397,6 @@ wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
-)
 
 try:
     if "__TKE__" in data.keys():
