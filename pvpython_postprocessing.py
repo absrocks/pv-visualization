@@ -361,18 +361,20 @@ def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
         raise RuntimeError("No array(s) provided for visualization.")
         
     # Decide association on the proxy
-    print("arrays", arrays)
-    
+    #print("arrays", arrays)
     pnames, cnames = list_point_cell_arrays(src)
-    print(f"pnames, cnames: {pnames}, {cnames}")
+    
     for array_name in arrays:
         if array_name in pnames:
             assoc = "POINTS"
+            globals()[array_name] = array_name
         elif array_name in cnames:
             assoc = "CELLS"
+            globals()[array_name] = array_name
         else:
             raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
                                f"POINTS={pnames}; CELLS={cnames}")
+    
     
     PF = r"""
 from vtkmodules.numpy_interface import dataset_adapter as dsa
@@ -395,26 +397,23 @@ wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
-print(f"ARRAy is :{__ARRAY__}")
-# --- local max of array ---
-if "__ARRAY__" in data.keys():
-    name = data["__ARRAY__"]
-    names = [name] if isinstance(name, str) else name
-print(f"ARRAy is :{__ARRAY__}, names : {names}")
-# Check and dynamically assign
-for n in names:
-    if n not in pd.keys():
-        raise RuntimeError("Array '%s' not found in PointData." % n)
-    else:
-        globals()[n] = np.asarray(pd[n]) 
+)
 
-try:        
-    if UAvg.shape[1] == 3:
-        U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
-    else:
-        raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
+try:
+    if "__TKE__" in data.keys():
+        TKE = np.asarray(data["__TKE__"])
+    if "__epsilon__" in data.keys():
+        epsilon = np.asarray(data["__epsilon__"])
+    if "__UAvg__" in data.keys():
+        TKE = np.asarray(data["__UAvg__"])
 except:
-    raise ValueError(f"UAvg is not present")
+    raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
+
+    
+if UAvg.shape[1] == 3:
+    U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
+else:
+    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
 
 
 pts = wrap.Points
@@ -453,7 +452,9 @@ fd.AddArray(abds)
 
     code = (
         PF.replace("__ASSOC__", assoc)
-          .replace("__ARRAY__", arrays)
+          .replace("__TKE__", TKE)
+          .replace("__epsilon__", epsilon)
+          .replace("__UAvg__", UAvg)
     )
 
     pf = ProgrammableFilter(Input=src)
