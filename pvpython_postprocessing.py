@@ -182,7 +182,7 @@ def main():
     try:
         if 'energy' in cfg.get("visualization")["out_array"]:
             src = apply_clipping(src, 'Z', zmin=0, zmax=zmax)
-            src = energy(src, cfg, axis_letter, effective_vis_array, base)
+            src = energy(src, cfg, axis_letter, avg_name, effective_vis_array)
         else:
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
         
@@ -193,7 +193,7 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def energy(src, cfg, axis_letter, effective_vis_array):
+def energy(src, cfg, axis_letter, vel, effective_vis_array):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
@@ -231,7 +231,7 @@ def energy(src, cfg, axis_letter, effective_vis_array):
               f"bounds {zmin,zmax,zz_max,xz_max}",
               flush=True)
         
-        src, efield = calculate_energy(src, xz_max, cfg, desired_array=effective_vis_array)
+        src, efield = calculate_energy(src, xz_max, cfg, vel, desired_array=effective_vis_array)
         KE, PE, total = read_global_stats(src, efield, time=t)
         
         print(f"[pvpython-child] Energy at t={t}: "
@@ -335,7 +335,7 @@ fd.AddArray(abds)
 
     return pf, "global_bounds"
     
-def calculate_energy(src, xslice, cfg, desired_array=None, *more_arrays):
+def calculate_energy(src, xslice, cfg, vel, desired_array=None, *more_arrays):
     
     src = apply_slices(src, 'X', loc=xslice)
     
@@ -396,9 +396,8 @@ points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
 AA = "__UAvg__"
 BB = "__TKE__"
-#print("UAvg, TKE", data[AA], data[BB])
-#print("TKE", np.asarray(data[BB]))
-print("UAvg", np.asarray(data[AA]))
+U = np.asarray(data[AA])
+#print("UAvg", U.shape[1])
 
 try:
     if "__TKE__" in data.keys():
@@ -412,10 +411,10 @@ except:
     raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
 
     
-#if UAvg.shape[1] == 3:
-#    U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
-#else:
-#    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
+if U.shape[1] == 3:
+    U_mag = np.sqrt(U[:, 0]**2 + U[:, 1]**2 + U[:, 2]**2)
+else:
+    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
 
 
 pts = wrap.Points
@@ -425,11 +424,11 @@ z = xyz[:,2]
 
 idx = np.argsort(z) 
 z_sort = z[idx] 
-#u_sort = U_mag[idx]
+u_sort = U_mag[idx]
 tke_sort = TKE[idx]
 eps_sort = epsilon[idx]
 
-#KE = 0.5 * np.trapz(u_sort**2, z_sort)
+KE = 0.5 * np.trapz(u_sort**2, z_sort)
 PE = 9.81 * np.trapz(z_sort, z_sort)
 TKE = np.trapz(tke_sort, z_sort)
 epsilon = np.trapz(eps_sort*3, z_sort)
@@ -456,7 +455,7 @@ fd.AddArray(abds)
         PF.replace("__ASSOC__", assoc)
           .replace("__TKE__", TKE)
           .replace("__epsilon__", epsilon)
-          .replace("__UAvg__", avg_name)
+          .replace("__UAvg__", vel)
     )
 
     pf = ProgrammableFilter(Input=src)
