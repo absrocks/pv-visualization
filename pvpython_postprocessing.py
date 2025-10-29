@@ -398,7 +398,7 @@ data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
 points = inp.GetPoints()
 num_points = points.GetNumberOfPoints()
 AA = "__UAvg__"
-print("UAvg", AA)
+print("UAvg", data[AA])
 try:
     if "__TKE__" in data.keys():
         TKE = np.asarray(data["__TKE__"])
