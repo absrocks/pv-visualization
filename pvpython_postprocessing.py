@@ -398,24 +398,24 @@ AA = "__UAvg__"
 BB = "__TKE__"
 print("UAvg, TKE", data[AA], data[BB])
 print("TKE", np.asarray(data[BB]))
-print("UAvg", np.asarray(data[AA]))
+#print("UAvg", np.asarray(data[AA]))
 
 try:
     if "__TKE__" in data.keys():
         TKE = np.asarray(data["__TKE__"])
     if "__epsilon__" in data.keys():
         epsilon = np.asarray(data["__epsilon__"])
-    if "__UAvg__" in data.keys():
-        UAvg = np.asarray(data["__UAvg__"])
+    #if "__UAvg__" in data.keys():
+    #    UAvg = np.asarray(data["__UAvg__"])
         
 except:
     raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
 
     
-if UAvg.shape[1] == 3:
-    U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
-else:
-    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
+#if UAvg.shape[1] == 3:
+#    U_mag = np.sqrt(UAvg[:, 0]**2 + UAvg[:, 1]**2 + UAvg[:, 2]**2)
+#else:
+#    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
 
 
 pts = wrap.Points
@@ -425,11 +425,11 @@ z = xyz[:,2]
 
 idx = np.argsort(z) 
 z_sort = z[idx] 
-u_sort = U_mag[idx]
+#u_sort = U_mag[idx]
 tke_sort = TKE[idx]
 eps_sort = epsilon[idx]
 
-KE = 0.5 * np.trapz(u_sort**2, z_sort) 
+#KE = 0.5 * np.trapz(u_sort**2, z_sort)
 PE = 9.81 * np.trapz(z_sort, z_sort)
 TKE = np.trapz(tke_sort, z_sort)
 epsilon = np.trapz(eps_sort*3, z_sort)
