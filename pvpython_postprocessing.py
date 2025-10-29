@@ -404,7 +404,7 @@ try:
     if "__epsilon__" in data.keys():
         epsilon = np.asarray(data["__epsilon__"])
     if "__UAvg__" in data.keys():
-        TKE = np.asarray(data["__UAvg__"])
+        UAvg = np.asarray(data["__UAvg__"])
 except:
     raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
 
@@ -422,7 +422,7 @@ z = xyz[:,2]
 
 idx = np.argsort(z) 
 z_sort = z[idx] 
-u_sort = u_mag[idx]
+u_sort = U_mag[idx]
 tke_sort = TKE[idx]
 eps_sort = epsilon[idx]
 
