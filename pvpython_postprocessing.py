@@ -55,9 +55,9 @@ INPUT_PARAMETERS = {
         'color_map': 'Jet',                 # colormap preset name
         'array': 'UAvg',                    # REQUIRED: array to visualize
         'out_array': 'energy',
-        'range': [0, 0.2],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': None,               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.2f',             # '6.1e' | '6.2f'
+        'range': [0, 1],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
@@ -136,8 +136,6 @@ def main():
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
     
-    
-    
     try:
         base = vis_array
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
@@ -167,11 +165,13 @@ def main():
             print(f"[pvpython-child] Energy output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src, te = calculate_te(src, avg_name, zmin, result_name="TE")
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
             src, grad_name = apply_gradient(src, prime_name)
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
-            effective_vis_array = [k_name, eps_name, avg_name]
+            
+            effective_vis_array = [k_name, eps_name, te]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         
     except Exception as e:
@@ -181,8 +181,10 @@ def main():
     # ---- Render & save ----
     try:
         if 'energy' in cfg.get("visualization")["out_array"]:
-            src = apply_clipping(src, 'Z', zmin=0, zmax=zmax)
-            src = energy(src, cfg, axis_letter, avg_name, effective_vis_array)
+            #src = apply_slices(src, "Y")
+            src = apply_clipping(src, 'Y', ymin=0, ymax=0.1)
+            src = Redistribute(src)
+            src = energy(src, cfg, effective_vis_array)
         else:
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
         
@@ -193,11 +195,15 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def energy(src, cfg, axis_letter, vel, effective_vis_array):
+def energy(src, cfg, effective_vis_array):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
     then print bounds at that time. Returns the averaging filter so caller can reuse.
     """
+    out_dat = "logs/surface_averages_no_Z0_pot.dat"
+    # write header once
+    dat_init(out_dat, effective_vis_array)
+    
     # 0) Gather times
     tk = GetTimeKeeper()
     times = list(getattr(tk, "TimestepValues", []) or [])
@@ -227,24 +233,125 @@ def energy(src, cfg, axis_letter, vel, effective_vis_array):
         gbounds = read_global_stats(pf, bfield, time=t)
         zz_max,xz_max = gbounds
         
-        print(f"[pvpython-child] bounds at t={t}: "
-              f"bounds {zmin,zmax,zz_max,xz_max}",
+        print(f"[pvpython-child] Maximum wave height at t={t}: "
+              f" is {zz_max} at x={xz_max}",
               flush=True)
+        src_y = apply_slices(src, "Y")
+        #src_z = apply_clipping(src_y, 'Z', zmin=0, zmax=zmax+1)
+        src_x = apply_clipping(src_y, 'X', xmin=xz_max-0.5, xmax=xz_max+0.5)
+        integ = integrate_variables(src_x)
         
-        src, efield = calculate_energy(src, xz_max, cfg, vel, desired_array=effective_vis_array)
-        KE, PE, total = read_global_stats(src, efield, time=t)
+        res, measure, missing = fetch_integrals(integ, effective_vis_array, return_average=True)
+        if missing:
+            print(f"[warn] t={t}: missing in integrator output: {missing}", flush=True)
+
+        dat_append(out_dat, t, effective_vis_array, res)
         
-        print(f"[pvpython-child] Energy at t={t}: "
-              f"Energy({array}) = KE:{KE:.6g}, PE:{KE:.6g}, Total Energy:{total:.6g}",
-              flush=True)
-        #src = apply_clipping(src, cfg, np.floor(xz_max) - 0.5)
+        print("Measure =", measure, " averages:",
+          " ".join(f"{k}={res.get(k,{}).get('average', float('nan')):.6g}" for k in effective_vis_array),
+          flush=True)
+        
+        src = apply_clipping(src, cfg.get("clipping")["axis"], xmin=np.floor(xz_max) - 0.5, xmax=cfg.get("clipping")["Xmax"])
+        src = Redistribute(src)
     return src
 
+def Redistribute(src):
+    d = RedistributeDataSet(Input=src)
+    d.UpdatePipeline()
+    src = d
+    
+    return src
+    
+def integrate_variables(src):
+    integ = IntegrateVariables(Input=src)
+    # NOTE: By default, IntegrateVariables returns pure integrals.
+    integ.UpdatePipeline()
+    
+    return integ
+
+def fetch_integrals(src, arrays, components=None, return_average=False):
+
+    dobj = sm.Fetch(src)
+    if dobj is None:
+        raise RuntimeError("IntegrateVariables: Fetch returned None.")
+        
+    wrap = dsa.WrapDataObject(dobj)
+    cd   = wrap.CellData  # IntegrateVariables writes results in CellData
+    pd   = wrap.PointData
+    
+    # Find geometric measure that IntegrateVariables provides
+    measure = float("nan")
+    for key in ("Volume", "Area", "Length"):
+        if key in cd.keys():
+            m = np.asarray(cd[key], dtype=float).ravel()
+            if m.size:
+                measure = float(m[0])
+                break
+
+    results = {}
+    missing = []
+    components = components or {}
+    
+    int = []
+    for name in arrays:
+        # Look up the integrated array in CellData first (usual), else PointData
+        if name in cd.keys():
+            raw = np.asarray(cd[name], dtype=float)
+        elif name in pd.keys():
+            raw = np.asarray(pd[name], dtype=float)
+        else:
+            missing.append(name)
+            continue
+
+        # raw is typically shape (1,) for scalar, or (1,C) for vector/tensor
+        vals = raw
+        if vals.ndim == 2 and vals.shape[0] == 1:
+            vals = vals[0]  # → shape (C,) or scalar
+
+        comp_sel = components.get(name, None)
+
+        if np.isscalar(vals):
+            val = float(vals)
+        elif vals.ndim == 1:
+            if comp_sel is None:
+                # If multi-comp and unspecified, require user to specify
+                if vals.shape[0] > 1:
+                    raise RuntimeError(
+                        f"IntegrateVariables: '{name}' has {vals.shape[0]} components; "
+                        f"set components['{name}']=<int> or 'Magnitude'."
+                    )
+                val = float(vals[0])
+            elif isinstance(comp_sel, str) and comp_sel.lower() == "magnitude":
+                val = float(np.linalg.norm(vals))
+            else:
+                idx = int(comp_sel)
+                if idx < 0 or idx >= vals.shape[0]:
+                    raise RuntimeError(f"components['{name}'] index {idx} out of range 0..{vals.shape[0]-1}")
+                val = float(vals[idx])
+        else:
+            # Unexpected higher-dim; flatten safely
+            flat = vals.ravel()
+            if comp_sel is None:
+                raise RuntimeError(
+                    f"IntegrateVariables: '{name}' has shape {vals.shape}; "
+                    f"set components['{name}']=<int> or 'Magnitude'."
+                )
+            if isinstance(comp_sel, str) and comp_sel.lower() == "magnitude":
+                val = float(np.linalg.norm(flat))
+            else:
+                val = float(flat[int(comp_sel)])
+
+        entry = {'integral': val}
+        if return_average and np.isfinite(measure) and measure != 0.0:
+            entry['average'] = val / measure
+        results[name] = entry
+
+    return results, measure, missing
+
+
 def global_max_and_bounds_pf(src, cfg):
-    
-    if cfg.get("slice")["enabled"] is True:
-        src = apply_slices(src, "Y")
-    
+
+
     """
     Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
     bounds, storing results in FieldData arrays:
@@ -273,25 +380,12 @@ out.ShallowCopy(inp)
 
 wrap = dsa.WrapDataObject(inp)
 data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
-points = inp.GetPoints()
-num_points = points.GetNumberOfPoints()
-
-    
-x1 = []
-z1 = []
-for i in range(num_points):
-    coord = points.GetPoint(i)
-    x1.append(coord[0])
-    z1.append(coord[2])
 
 pts = wrap.Points
 xyz = np.asarray(pts, dtype=float)
+z = xyz[:,2]
+x = xyz[:,0]
 
-
-
-x = np.array(x1)
-z = np.array(z1)
-ztest = comm.allgather(z)
 zz_max, xz_max = 0, 0
 
 i_local   = int(np.argmax(z))
@@ -334,139 +428,74 @@ fd.AddArray(abds)
     pf.UpdatePipeline()
 
     return pf, "global_bounds"
+
+def calculate_te(src, vec_name, zmin, result_name='TE', g=9.81):
     
-def calculate_energy(src, xslice, cfg, vel, desired_array=None, *more_arrays):
+    def _quote_if_needed(name: str) -> str:
+        return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
     
-    src = apply_slices(src, 'X', loc=xslice)
-    
-    """
-    Build a ProgrammableFilter that computes GLOBAL max of `array_name` and GLOBAL
-    bounds, storing results in FieldData arrays:
-      - "global_max__<array_name>"  (double, 1-tuple)
-      - "global_bounds"             (double, 1-tuple, 6 components)
-    Returns: (pf_proxy, max_field_name, bounds_field_name)
-    """
-    arrays = []
-    if desired_array is not None:
-        if isinstance(desired_array, (list, tuple, set)):
-            arrays.extend(list(desired_array))
-        else:
-            arrays.append(desired_array)
-    if more_arrays:
-        arrays.extend(list(more_arrays))
-    if not arrays:
-        # fallback to config if nothing explicitly passed
-        raise RuntimeError("No array(s) provided for visualization.")
-        
-    # Decide association on the proxy
-    print("arrays", arrays)
     pnames, cnames = list_point_cell_arrays(src)
+    if vec_name in pnames:
+        assoc = 'POINTS'
+    elif vec_name in cnames:
+        assoc = 'CELLS'
+    else:
+        raise RuntimeError(
+            f"calculate_energy: vector '{vec_name}' not found. "
+            f"Point arrays: {pnames}; Cell arrays: {cnames}"
+        )
+
+    src_pts = ensure_points_for_array(src, vec_name)
+    q = _quote_if_needed(vec_name)
     
-    for array_name in arrays:
-        if array_name in pnames:
-            assoc = "POINTS"
-            globals()[array_name] = array_name
-        elif array_name in cnames:
-            assoc = "CELLS"
-            globals()[array_name] = array_name
-        else:
-            raise RuntimeError(f"global_max_and_bounds_pf: '{array_name}' not found. "
-                               f"POINTS={pnames}; CELLS={cnames}")
+    kinetic = f"0.5*dot({q},{q})"
+    expr = f"{kinetic} + {float(g)}*(coordsZ+{zmin})"
     
-    PF = r"""
-from vtkmodules.numpy_interface import dataset_adapter as dsa
-from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
-from vtkmodules.vtkCommonCore import vtkDoubleArray
-import numpy as np, math
-from vtk import vtkMPI4PyCommunicator
-from mpi4py import MPI
+    calc_te = Calculator(Input=src_pts)
+    calc_te.ResultArrayName = result_name
+    calc_te.Function = expr
+    calc_te.UpdatePipeline()
 
-# --- MPI ---
-ctrl = vtkMultiProcessController.GetGlobalController()
-comm = vtkMPI4PyCommunicator.ConvertToPython(ctrl.GetCommunicator())
-rank = comm.Get_rank()
+    # Done
+    return calc_te, result_name
+    
+def _ensure_parent(path: str):
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(d, exist_ok=True)
 
-inp = self.GetInputDataObject(0, 0)
-out = self.GetOutputDataObject(0)
-out.ShallowCopy(inp)
+def dat_init(path: str, arrays: list, suffix="_avg"):
+    """
+    Create/overwrite a .dat file with a header:
+    # Time <A1_suffix> <A2_suffix> ...
+    """
+    _ensure_parent(path)
+    with open(path, "w") as f:
+        cols = ["Time"] + [f"{name}{suffix}" for name in arrays]
+        f.write("# " + " ".join(cols) + "\n")
 
-wrap = dsa.WrapDataObject(inp)
-data = wrap.PointData if "__ASSOC__" == "POINTS" else wrap.CellData
-points = inp.GetPoints()
-num_points = points.GetNumberOfPoints()
-AA = "__UAvg__"
-BB = "__TKE__"
-U = np.asarray(data[AA])
-#print("UAvg", U.shape[1])
+def dat_append(path: str, t: float, arrays: list, results: dict, suffix="_avg"):
+    """
+    Append one row for time t.
+    `results` is the dict returned by fetch_integrals(...)[0]
+    (i.e., {name: {'integral': ..., 'average': ...}, ...})
+    Missing or absent averages are written as NaN.
+    """
+    vals = []
+    for name in arrays:
+        avg = results.get(name, {}).get("average", float("nan"))
+        # ensure float for formatting
+        try:
+            v = float(avg)
+        except Exception:
+            v = float("nan")
+        vals.append(v)
 
-try:
-    if "__TKE__" in data.keys():
-        TKE = np.asarray(data["__TKE__"])
-    if "__epsilon__" in data.keys():
-        epsilon = np.asarray(data["__epsilon__"])
-    #if "__UAvg__" in data.keys():
-    #    UAvg = np.asarray(data["__UAvg__"])
+    line = "{: .9g} ".format(t) + " ".join("{: .9g}".format(v) for v in vals) + "\n"
+    with open(path, "a") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())  # make it visible during long SLURM runs
         
-except:
-    raise RuntimeError("TKE,epsilon or UAvg not found in PointData")
-
-    
-if U.shape[1] == 3:
-    U_mag = np.sqrt(U[:, 0]**2 + U[:, 1]**2 + U[:, 2]**2)
-else:
-    raise ValueError(f"Expected shape (n, 3), but got {U.shape}")
-
-
-pts = wrap.Points
-xyz = np.asarray(pts, dtype=float)
-z = xyz[:,2]
-
-
-idx = np.argsort(z) 
-z_sort = z[idx] 
-u_sort = U_mag[idx]
-tke_sort = TKE[idx]
-eps_sort = epsilon[idx]
-
-KE = 0.5 * np.trapz(u_sort**2, z_sort)
-PE = 9.81 * np.trapz(z_sort, z_sort)
-TKE = np.trapz(tke_sort, z_sort)
-epsilon = np.trapz(eps_sort*3, z_sort)
-
-energy = KE + PE + TKE + epsilon
-total_energy = comm.allreduce(energy, MPI.SUM)
-
-# --- write FieldData using explicit vtkDoubleArray ---
-fd = out.GetFieldData()
-
-# global max
-
-# global bounds as 1-tuple, 6 components
-abds = vtkDoubleArray()
-abds.SetName("Energy")
-abds.SetNumberOfComponents(3)
-abds.SetNumberOfTuples(1)
-abds.SetTuple(0, (KE, PE, total_energy))
-fd.RemoveArray(abds.GetName())
-fd.AddArray(abds)
-""".lstrip()
-
-    code = (
-        PF.replace("__ASSOC__", assoc)
-          .replace("__TKE__", TKE)
-          .replace("__epsilon__", epsilon)
-          .replace("__UAvg__", vel)
-    )
-
-    pf = ProgrammableFilter(Input=src)
-    pf.Script = code
-    pf.RequestInformationScript = ''
-    pf.RequestUpdateExtentScript = ''
-    pf.PythonPath = ''
-    pf.UpdatePipeline()
-    
-    
-    return pf, "Energy"
 
 def read_global_stats(pf_proxy, bounds_field_name, time=None):
     """
