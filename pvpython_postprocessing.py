@@ -165,13 +165,13 @@ def main():
             print(f"[pvpython-child] Energy output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
-            src, te = calculate_te(src, avg_name, zmin, result_name="TE")
+            src, ke = calculate_ke(src, avg_name, result_name="KE")
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
             src, grad_name = apply_gradient(src, prime_name)
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
             
-            effective_vis_array = [k_name, eps_name, te]
+            effective_vis_array = [k_name, eps_name, ke, None]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         
     except Exception as e:
@@ -181,7 +181,6 @@ def main():
     # ---- Render & save ----
     try:
         if 'energy' in cfg.get("visualization")["out_array"]:
-            #src = apply_slices(src, "Y")
             src = apply_clipping(src, 'Y', ymin=0, ymax=0.1)
             src = Redistribute(src)
             src = energy(src, cfg, effective_vis_array)
@@ -239,7 +238,9 @@ def energy(src, cfg, effective_vis_array):
         src_y = apply_slices(src, "Y")
         #src_z = apply_clipping(src_y, 'Z', zmin=0, zmax=zmax+1)
         src_x = apply_clipping(src_y, 'X', xmin=xz_max-0.5, xmax=xz_max+0.5)
-        integ = integrate_variables(src_x)
+        src_pe, pe = calculate_pe(src_x, result_name="PE")
+        effective_vis_array[-1] = pe
+        integ = integrate_variables(src_pe)
         
         res, measure, missing = fetch_integrals(integ, effective_vis_array, return_average=True)
         if missing:
@@ -429,7 +430,18 @@ fd.AddArray(abds)
 
     return pf, "global_bounds"
 
-def calculate_te(src, vec_name, zmin, result_name='TE', g=9.81):
+def calculate_pe(src, result_name='PE', g=9.81):
+    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+    expr =  f"{float(g)} * (coordsZ - {float(zmin)})"
+    calc_pe = Calculator(Input=src)
+    calc_pe.ResultArrayName = result_name
+    calc_pe.Function = expr
+    calc_pe.UpdatePipeline()
+
+    # Done
+    return calc_pe, result_name
+    
+def calculate_ke(src, vec_name, result_name='KE'):
     
     def _quote_if_needed(name: str) -> str:
         return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
@@ -449,15 +461,15 @@ def calculate_te(src, vec_name, zmin, result_name='TE', g=9.81):
     q = _quote_if_needed(vec_name)
     
     kinetic = f"0.5*dot({q},{q})"
-    expr = f"{kinetic} + {float(g)}*(coordsZ+{zmin})"
+    expr = f"{kinetic}"
     
-    calc_te = Calculator(Input=src_pts)
-    calc_te.ResultArrayName = result_name
-    calc_te.Function = expr
-    calc_te.UpdatePipeline()
+    calc_ke = Calculator(Input=src_pts)
+    calc_ke.ResultArrayName = result_name
+    calc_ke.Function = expr
+    calc_ke.UpdatePipeline()
 
     # Done
-    return calc_te, result_name
+    return calc_ke, result_name
     
 def _ensure_parent(path: str):
     d = os.path.dirname(os.path.abspath(path)) or "."
