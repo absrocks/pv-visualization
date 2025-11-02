@@ -54,14 +54,14 @@ INPUT_PARAMETERS = {
         'image_size': [1200, 800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'UAvg',                    # REQUIRED: array to visualize
-        'out_array': 'energy',
-        'range': [0, 1],                  # e.g., [0.0, 5.0]; None = auto
+        'out_array': 'epsilon',
+        'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
-        'show_axis': False,
+        'show_axis': True,
     },
     
 }
@@ -441,11 +441,39 @@ def calculate_pe(src, result_name='PE', g=9.81):
     # Done
     return calc_pe, result_name
     
+def _quote_if_needed(name: str) -> str:
+    return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
+    
+def calculate_flux(src, vec_name, zmin, result_name='flux', g=9.81):
+    pnames, cnames = list_point_cell_arrays(src)
+    if vec_name in pnames:
+        assoc = 'POINTS'
+    elif vec_name in cnames:
+        assoc = 'CELLS'
+    else:
+        raise RuntimeError(
+            f"calculate_energy: vector '{vec_name}' not found. "
+            f"Point arrays: {pnames}; Cell arrays: {cnames}"
+        )
+
+    src_pts = ensure_points_for_array(src, vec_name)
+    q = _quote_if_needed(vec_name)
+    
+    kinetic = f"q*0.5*dot({q},{q})"
+    potential = f"q*{float(g)} * (coordsZ - {float(zmin)})"
+    
+    expr = f"{kinetic} + {potential}"
+    
+    calc_flux = Calculator(Input=src_pts)
+    calc_flux.ResultArrayName = result_name
+    calc_flux.Function = expr
+    calc_flux.UpdatePipeline()
+
+    # Done
+    return calc_flux, result_name
+
 def calculate_ke(src, vec_name, result_name='KE'):
-    
-    def _quote_if_needed(name: str) -> str:
-        return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
-    
+
     pnames, cnames = list_point_cell_arrays(src)
     if vec_name in pnames:
         assoc = 'POINTS'
