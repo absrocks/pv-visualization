@@ -444,7 +444,8 @@ def calculate_pe(src, result_name='PE', g=9.81):
 def _quote_if_needed(name: str) -> str:
     return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
     
-def calculate_flux(src, vec_name, zmin, result_name='flux', g=9.81):
+def calculate_flux(src, vec_name, result_name='flux', g=9.81):
+    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     pnames, cnames = list_point_cell_arrays(src)
     if vec_name in pnames:
         assoc = 'POINTS'
