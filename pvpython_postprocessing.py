@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 6,        # None --> to start from 0
-    'end_time': 20,
+    'start_time': 16,        # None --> to start from 0
+    'end_time': 18,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -35,7 +35,7 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 1.0,
+        'Xmin': 21.0,
         'Xmax': 34.0,
     },
     'slice': {
@@ -51,17 +51,17 @@ INPUT_PARAMETERS = {
 
     # ---- Visualization options ----
     'visualization': {
-        'image_size': [1200, 800],          # [width, height]
+        'image_size': [2400, 1800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'UAvg',                    # REQUIRED: array to visualize
-        'out_array': 'epsilon',
+        'out_array': 'flux',
         'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
-        'show_axis': True,
+        'show_axis': False,
     },
     
 }
@@ -131,16 +131,17 @@ def main():
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     
     # Apply IsoVolume
-    src = apply_isovolume(src, cfg)
+    #src = apply_isovolume(src, cfg)
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
-    src = flatten_dataset(src)
+    #src = flatten_dataset(src)
     
     try:
         base = vis_array
         src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
         print(f"[pvpython-child] Calculated array: {avg_name}")
         # Compute average
+        src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
         
         if 'k' in cfg.get("visualization")["out_array"]:
             
@@ -173,6 +174,18 @@ def main():
             
             effective_vis_array = [k_name, eps_name, ke, None]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
+        if 'flux' in cfg.get("visualization")["out_array"]:
+            print(f"[pvpython-child] Energy output will be written")
+            prime_name = f"{base}_prime_{axis_letter}"
+            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src, ke = calculate_ke(src, avg_name, result_name="KE")
+            src, tke = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
+        
+            src, grad_name = apply_gradient(src, prime_name)
+            src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
+        
+        src = apply_isovolume(src, cfg, array_name=alpha_avg)
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
@@ -184,7 +197,13 @@ def main():
             src = apply_clipping(src, 'Y', ymin=0, ymax=0.1)
             src = Redistribute(src)
             src = energy(src, cfg, effective_vis_array)
+        if 'flux' in cfg.get("visualization")["out_array"]:
+            src = apply_slices(src, "Y")
+            src = apply_slices(src, "X", loc=22)
+            src, flux = calculate_flux(src, avg_name, tke, result_name='flux')
+            effective_vis_array = [flux, eps_name]
         else:
+            src = apply_slices(src, "Y")
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
         
     except Exception as e:
@@ -194,6 +213,42 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
+def flux(src, cfg, effective_vis_array):
+    
+    flux_out = cfg.get("output_directory") + "/" + "eflux.dat"
+    
+    # write header once
+    dat_init(flux_out, effective_vis_array)
+    
+    tk = GetTimeKeeper()
+    times = list(getattr(tk, "TimestepValues", []) or [])
+    if not times:
+        times = list(getattr(src, "TimestepValues", []) or [])
+    
+    # Optional window
+    tmin = cfg.get("start_time", None)
+    tmax = cfg.get("end_time", None)
+    print("tmin",tmin, "tmax",tmax)
+    
+    for t in times:
+        if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
+            continue
+        GetAnimationScene().AnimationTime = t
+        try:
+            src.UpdatePipeline(time=t)
+        except Exception:
+            src.UpdatePipeline()
+        integ = integrate_variables(src)
+        res, measure, missing = fetch_integrals(integ, effective_vis_array, return_average=True)
+        if missing:
+            print(f"[warn] t={t}: missing in integrator output: {missing}", flush=True)
+
+        dat_append(out_dat, t, effective_vis_array, res)
+        
+        print("Measure =", measure, " averages:",
+          " ".join(f"{k}={res.get(k,{}).get('average', float('nan')):.6g}" for k in effective_vis_array),
+          flush=True)
+    
 def energy(src, cfg, effective_vis_array):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
@@ -444,26 +499,27 @@ def calculate_pe(src, result_name='PE', g=9.81):
 def _quote_if_needed(name: str) -> str:
     return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
     
-def calculate_flux(src, vec_name, result_name='flux', g=9.81):
+def calculate_flux(src, vec_name, tke, result_name='flux', g=9.81):
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     pnames, cnames = list_point_cell_arrays(src)
-    if vec_name in pnames:
+    if (vec_name in pnames) and (tke in pnames):
         assoc = 'POINTS'
-    elif vec_name in cnames:
+    elif (vec_name in cnames) and (tke in cnames):
         assoc = 'CELLS'
     else:
         raise RuntimeError(
-            f"calculate_energy: vector '{vec_name}' not found. "
+            f"calculate_energy: vector '{vec_name}' or TKE '{tke}' not found. "
             f"Point arrays: {pnames}; Cell arrays: {cnames}"
         )
 
     src_pts = ensure_points_for_array(src, vec_name)
     q = _quote_if_needed(vec_name)
+    tke = _quote_if_needed(tke)
     
     kinetic = f"q*0.5*dot({q},{q})"
     potential = f"q*{float(g)} * (coordsZ - {float(zmin)})"
-    
-    expr = f"{kinetic} + {potential}"
+    tke_flux = f"q*{tke}"
+    expr = f"{kinetic} + {potential} + {tke_flux}"
     
     calc_flux = Calculator(Input=src_pts)
     calc_flux.ResultArrayName = result_name
