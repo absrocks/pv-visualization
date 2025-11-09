@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 16,        # None --> to start from 0
-    'end_time': 18,
+    'start_time': 6,        # None --> to start from 0
+    'end_time': 20,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -175,10 +175,9 @@ def main():
             effective_vis_array = [k_name, eps_name, ke, None]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         if 'flux' in cfg.get("visualization")["out_array"]:
-            print(f"[pvpython-child] Energy output will be written")
+            print(f"[pvpython-child] Flux output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
-            src, ke = calculate_ke(src, avg_name, result_name="KE")
             src, tke = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
         
             src, grad_name = apply_gradient(src, prime_name)
@@ -200,8 +199,10 @@ def main():
         if 'flux' in cfg.get("visualization")["out_array"]:
             src = apply_slices(src, "Y")
             src = apply_slices(src, "X", loc=22)
-            src, flux = calculate_flux(src, avg_name, tke, result_name='flux')
-            effective_vis_array = [flux, eps_name]
+            src, flux, flux_eps = calculate_fluxes(src, avg_name, tke, eps_name, out1='Flux', out2='Flux_eps')
+            effective_vis_array = [flux, flux_eps]
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
+            src = out_flux(src, cfg, effective_vis_array)
         else:
             src = apply_slices(src, "Y")
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
@@ -213,12 +214,12 @@ def main():
     print("[pvpython-child] Completed successfully.")
     return 0
 
-def flux(src, cfg, effective_vis_array):
-    
-    flux_out = cfg.get("output_directory") + "/" + "eflux.dat"
+def out_flux(src, cfg, effective_vis_array):
+    flux_dat = cfg.get("output_directory") + "/" + "eflux.dat"
+    print("The Flux data will be saved at: ",flux_dat)
     
     # write header once
-    dat_init(flux_out, effective_vis_array)
+    dat_init(flux_dat, effective_vis_array)
     
     tk = GetTimeKeeper()
     times = list(getattr(tk, "TimestepValues", []) or [])
@@ -239,15 +240,40 @@ def flux(src, cfg, effective_vis_array):
         except Exception:
             src.UpdatePipeline()
         integ = integrate_variables(src)
-        res, measure, missing = fetch_integrals(integ, effective_vis_array, return_average=True)
+        res, measure, missing = fetch_integrals(integ, effective_vis_array, components=None, return_average=True)
         if missing:
             print(f"[warn] t={t}: missing in integrator output: {missing}", flush=True)
 
-        dat_append(out_dat, t, effective_vis_array, res)
-        
+        dat_append(flux_dat, t, effective_vis_array, res)
+        print("res", res)
         print("Measure =", measure, " averages:",
           " ".join(f"{k}={res.get(k,{}).get('average', float('nan')):.6g}" for k in effective_vis_array),
           flush=True)
+    return src
+
+def calculate_magnitude(src, array_name):
+    """
+    If `array_name` has >1 components, create <name>_Magnitude via Calculator.
+    Returns (proxy_with_mag, magnitude_name). If scalar, returns (src, None).
+    """
+    pnames, cnames = list_point_cell_arrays(src)
+    if array_name in pnames:
+        assoc = 'POINTS'
+    elif array_name in cnames:
+        assoc = 'CELLS'
+    else:
+        raise RuntimeError(
+            f"calculate_magnitude: '{array_name}' not found on input. "
+            f"POINTS={pnames}; CELLS={cnames}"
+        )
+
+    q = _quote_if_needed(array_name)
+    calc = Calculator(Input=src)
+    calc.AttributeType   = ('Point Data' if assoc == 'POINTS' else 'Cell Data')
+    calc.ResultArrayName = f"{array_name}_Magnitude"
+    calc.Function        = f"mag({q})"
+    calc.UpdatePipeline()
+    return calc, calc.ResultArrayName
     
 def energy(src, cfg, effective_vis_array):
     """
@@ -326,31 +352,45 @@ def integrate_variables(src):
     return integ
 
 def fetch_integrals(src, arrays, components=None, return_average=False):
-
+    """
+    Read integrated values for `arrays` from an IntegrateVariables *proxy* `src`.
+    For multi-component arrays with no component specified, FIRST look for a
+    magnitude column in the integrator output:
+        '<name>_Magnitude', '<name>_input_1', '<name>_mag', '|<name>|', 'mag(<name>)'.
+    If none exists, auto-create it via `calculate_magnitude` (post-integrate) and use that.
+    """
     dobj = sm.Fetch(src)
     if dobj is None:
         raise RuntimeError("IntegrateVariables: Fetch returned None.")
-        
+
     wrap = dsa.WrapDataObject(dobj)
-    cd   = wrap.CellData  # IntegrateVariables writes results in CellData
+    cd   = wrap.CellData
     pd   = wrap.PointData
-    
-    # Find geometric measure that IntegrateVariables provides
+
+    # Geometric measure (Volume/Area/Length) from CellData if present
     measure = float("nan")
     for key in ("Volume", "Area", "Length"):
         if key in cd.keys():
             m = np.asarray(cd[key], dtype=float).ravel()
             if m.size:
-                measure = float(m[0])
-                break
+                measure = float(m[0]); break
 
-    results = {}
-    missing = []
+    results    = {}
+    missing    = []
     components = components or {}
-    
-    int = []
+
+    def _find_mag_column(base):
+        for nm in (f"{base}_Magnitude", f"{base}_input_1", f"{base}_mag", f"|{base}|", f"mag({base})"):
+            if nm in cd.keys():
+                arr = np.asarray(cd[nm], dtype=float)
+                return (arr[0] if arr.ndim == 2 and arr.shape[0] == 1 else arr), nm
+            if nm in pd.keys():
+                arr = np.asarray(pd[nm], dtype=float)
+                return (arr[0] if arr.ndim == 2 and arr.shape[0] == 1 else arr), nm
+        return None, None
+
     for name in arrays:
-        # Look up the integrated array in CellData first (usual), else PointData
+        # Pull from integrator output (prefer CellData)
         if name in cd.keys():
             raw = np.asarray(cd[name], dtype=float)
         elif name in pd.keys():
@@ -359,43 +399,56 @@ def fetch_integrals(src, arrays, components=None, return_average=False):
             missing.append(name)
             continue
 
-        # raw is typically shape (1,) for scalar, or (1,C) for vector/tensor
-        vals = raw
-        if vals.ndim == 2 and vals.shape[0] == 1:
-            vals = vals[0]  # → shape (C,) or scalar
-
+        vals = raw[0] if (raw.ndim == 2 and raw.shape[0] == 1) else raw
         comp_sel = components.get(name, None)
 
         if np.isscalar(vals):
             val = float(vals)
-        elif vals.ndim == 1:
+
+        elif vals.ndim == 1:  # multi-component vector/tensor
             if comp_sel is None:
-                # If multi-comp and unspecified, require user to specify
-                if vals.shape[0] > 1:
-                    raise RuntimeError(
-                        f"IntegrateVariables: '{name}' has {vals.shape[0]} components; "
-                        f"set components['{name}']=<int> or 'Magnitude'."
-                    )
-                val = float(vals[0])
+                alt, alt_nm = _find_mag_column(name)
+                if alt is None:
+                    # Create <name>_Magnitude on-the-fly (post-integrate), then re-fetch
+                    src, mag_nm = calculate_magnitude(src, name)
+                    dobj = sm.Fetch(src)
+                    if dobj is None:
+                        raise RuntimeError("IntegrateVariables (after mag creation): Fetch returned None.")
+                    wrap = dsa.WrapDataObject(dobj)
+                    cd, pd = wrap.CellData, wrap.PointData
+                    # Try again
+                    if mag_nm in cd.keys():
+                        alt = np.asarray(cd[mag_nm], dtype=float)
+                    elif mag_nm in pd.keys():
+                        alt = np.asarray(pd[mag_nm], dtype=float)
+                    else:
+                        raise RuntimeError(f"IntegrateVariables: failed to create '{mag_nm}'.")
+                val = float(np.asarray(alt).ravel()[0])
             elif isinstance(comp_sel, str) and comp_sel.lower() == "magnitude":
-                val = float(np.linalg.norm(vals))
+                alt, _ = _find_mag_column(name)
+                if alt is None:
+                    # Same as above: create then read
+                    src, _ = calculate_magnitude(src, name)
+                    dobj = sm.Fetch(src)
+                    if dobj is None:
+                        raise RuntimeError("IntegrateVariables (after mag creation): Fetch returned None.")
+                    wrap = dsa.WrapDataObject(dobj)
+                    cd, pd = wrap.CellData, wrap.PointData
+                    alt, _ = _find_mag_column(name)
+                    if alt is None:
+                        raise RuntimeError(
+                            f"IntegrateVariables: requested magnitude for '{name}', "
+                            f"but could not create/find magnitude column."
+                        )
+                val = float(np.asarray(alt).ravel()[0])
             else:
                 idx = int(comp_sel)
                 if idx < 0 or idx >= vals.shape[0]:
                     raise RuntimeError(f"components['{name}'] index {idx} out of range 0..{vals.shape[0]-1}")
                 val = float(vals[idx])
+
         else:
-            # Unexpected higher-dim; flatten safely
-            flat = vals.ravel()
-            if comp_sel is None:
-                raise RuntimeError(
-                    f"IntegrateVariables: '{name}' has shape {vals.shape}; "
-                    f"set components['{name}']=<int> or 'Magnitude'."
-                )
-            if isinstance(comp_sel, str) and comp_sel.lower() == "magnitude":
-                val = float(np.linalg.norm(flat))
-            else:
-                val = float(flat[int(comp_sel)])
+            raise RuntimeError(f"IntegrateVariables: '{name}' returned shape {vals.shape}, not supported.")
 
         entry = {'integral': val}
         if return_average and np.isfinite(measure) and measure != 0.0:
@@ -498,36 +551,52 @@ def calculate_pe(src, result_name='PE', g=9.81):
     
 def _quote_if_needed(name: str) -> str:
     return name if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name) else f'"{name}"'
-    
-def calculate_flux(src, vec_name, tke, result_name='flux', g=9.81):
-    (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+
+
+def calculate_fluxes(src, vec_name, tke_name, eps, out1='flux', out2='flux_eps', g=9.81):
+    # sanity: both arrays must live in same association
     pnames, cnames = list_point_cell_arrays(src)
-    if (vec_name in pnames) and (tke in pnames):
+    if (vec_name in pnames) and (tke_name in pnames):
         assoc = 'POINTS'
-    elif (vec_name in cnames) and (tke in cnames):
+    elif (vec_name in cnames) and (tke_name in cnames):
         assoc = 'CELLS'
     else:
         raise RuntimeError(
-            f"calculate_energy: vector '{vec_name}' or TKE '{tke}' not found. "
-            f"Point arrays: {pnames}; Cell arrays: {cnames}"
+            f"calculate_fluxes: '{vec_name}' and '{tke_name}' must both be in POINTS or both in CELLS. "
+            f"POINTS={pnames}; CELLS={cnames}"
         )
 
-    src_pts = ensure_points_for_array(src, vec_name)
+    # stay on original assoc (no cell→point conversion)
     q = _quote_if_needed(vec_name)
-    tke = _quote_if_needed(tke)
-    
-    kinetic = f"q*0.5*dot({q},{q})"
-    potential = f"q*{float(g)} * (coordsZ - {float(zmin)})"
-    tke_flux = f"q*{tke}"
-    expr = f"{kinetic} + {potential} + {tke_flux}"
-    
-    calc_flux = Calculator(Input=src_pts)
-    calc_flux.ResultArrayName = result_name
-    calc_flux.Function = expr
-    calc_flux.UpdatePipeline()
+    tkeq = _quote_if_needed(tke_name)
+    epsq = _quote_if_needed(eps)
 
-    # Done
-    return calc_flux, result_name
+    xmin,xmax,ymin,ymax,zmin,zmax = _domain_bounds(src)  # your helper
+    # vector flux pieces: scalar * vector
+    kinetic   = f"0.5*dot({q},{q})*{q}"
+    potential = f"{float(g)}*(coordsZ - {float(zmin)})*{q}"
+    tke_flux  = f"{tkeq}*{q}"
+    eps_flux = f"{epsq}*{q}"
+
+    # Calculator 1: mechanical flux (kinetic + potential)
+    calc1 = Calculator(Input=src)
+    calc1.AttributeType   = ('Point Data' if assoc=='POINTS' else 'Cell Data')
+    calc1.ResultArrayName = out1
+    calc1.Function        = f"({kinetic}) + ({potential}) + ({tke_flux})"
+    calc1.UpdatePipeline()
+
+    # Calculator 2: turbulent kinetic energy flux
+    calc2 = Calculator(Input=src)
+    calc2.AttributeType   = ('Point Data' if assoc=='POINTS' else 'Cell Data')
+    calc2.ResultArrayName = out2
+    calc2.Function        = eps_flux
+    calc2.UpdatePipeline()
+
+    # Combine both outputs onto one proxy
+    merged = AppendAttributes(Input=[calc1, calc2])
+    merged.UpdatePipeline()
+    return merged, out1, out2
+
 
 def calculate_ke(src, vec_name, result_name='KE'):
 
