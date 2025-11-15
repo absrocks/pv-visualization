@@ -198,7 +198,7 @@ def main():
             src = energy(src, cfg, effective_vis_array)
         if 'flux' in cfg.get("visualization")["out_array"]:
             src = apply_slices(src, "Y")
-            src = apply_slices(src, "X", loc=22)
+            src = apply_slices(src, "X", loc=25)
             src, flux, flux_eps = calculate_fluxes(src, avg_name, tke, eps_name, out1='Flux', out2='Flux_eps')
             effective_vis_array = [flux, flux_eps]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
@@ -215,7 +215,7 @@ def main():
     return 0
 
 def out_flux(src, cfg, effective_vis_array):
-    flux_dat = cfg.get("output_directory") + "/" + "eflux.dat"
+    flux_dat = cfg.get("output_directory") + "/" + "eflux_x25.dat"
     print("The Flux data will be saved at: ",flux_dat)
     
     # write header once

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # Define the path and filename
 path = "/Users/abhishek/work/free_surface_2025/wang_kraus_scaled/elongated/data"
-filename = "eflux.dat"
+filename = "eflux_x25.dat"
 
 # Join the directory and filename to make a full path
 filepath = os.path.join(path, filename)
@@ -18,9 +18,9 @@ eflux = data[:, 1]  # 4th column
 
 # Plot
 plt.figure(figsize=(8, 5))
-plt.plot(t, eflux, marker='o', linestyle='-', label='Column 1 vs Column 4')
+plt.plot(t, eflux, marker='o', linestyle='-', label='Energy Flux at x=25m')
 plt.xlabel('Time (s)')
-plt.ylabel('Total Energy Flux')
+plt.ylabel(r'Total Energy Flux (${m}^3/{s}^3$)')
 plt.title('Plot of Total FLux with TIme')
 plt.legend()
 plt.grid(True)
