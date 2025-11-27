@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 6,        # None --> to start from 0
-    'end_time': 20,
+    'start_time': 3,        # None --> to start from 0
+    'end_time': 30,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -35,7 +35,7 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 21.0,
+        'Xmin': 1.0,
         'Xmax': 34.0,
     },
     'slice': {
@@ -45,16 +45,16 @@ INPUT_PARAMETERS = {
     'openfoam': {
         'mode': 'decomposed',                                        # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],                            # or [] / None
-        'cell_arrays':  ['U', 'alpha.water', 'nut', 'UAvg'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water', 'nut', 'UAvg'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water', 'nut', 'EpsAvg', 'EpsIn'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water', 'nut', 'EpsAvg', 'EpsIn'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
     'visualization': {
         'image_size': [2400, 1800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'UAvg',                    # REQUIRED: array to visualize
-        'out_array': 'flux',
+        'array': 'EpsIn',                    # REQUIRED: array to visualize
+        'out_array': 'in_epsilon',
         'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
@@ -138,13 +138,20 @@ def main():
     
     try:
         base = vis_array
-        src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-        print(f"[pvpython-child] Calculated array: {avg_name}")
-        # Compute average
-        src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
         
-        if 'k' in cfg.get("visualization")["out_array"]:
+        if 'in_eps' in cfg.get("visualization")["out_array"]:
+            src, eps_name_in = apply_spanwise_average(src, axis_letter=axis_letter, array_name="EpsIn")
+            print(f"[pvpython-child] Calculated array: {eps_name_in}")
+            src, eps_name_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="EpsAvg")
+            print(f"[pvpython-child] Calculated array: {eps_name_avg}")
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
+            effective_vis_array = [eps_name_in, eps_name_avg]
             
+        if 'k' in cfg.get("visualization")["out_array"]:
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"[pvpython-child] Calculated array: {avg_name}")
+            # Compute average
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
             print(f"[pvpython-child] TKE output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
@@ -152,7 +159,7 @@ def main():
             effective_vis_array = k_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
         
-        if 'eps' in cfg.get("visualization")["out_array"]:
+        if 'turb_eps' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Epsilon output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
