@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 3,        # None --> to start from 0
-    'end_time': 30,
+    'start_time': 2.4,        # None --> to start from 0
+    'end_time': 2.6,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -35,8 +35,8 @@ INPUT_PARAMETERS = {
     'clipping': {
         'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 1.0,
-        'Xmax': 34.0,
+        'Xmin': 0.0,
+        'Xmax': 10.0,
     },
     'slice': {
         'enabled': True,      # set False to disable
@@ -45,23 +45,23 @@ INPUT_PARAMETERS = {
     'openfoam': {
         'mode': 'decomposed',                                        # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],                            # or [] / None
-        'cell_arrays':  ['U', 'alpha.water', 'nut', 'EpsAvg', 'EpsIn'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water', 'nut', 'EpsAvg', 'EpsIn'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water', 'EpsAvg', 'EpsIn'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water', 'EpsAvg', 'EpsIn'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
     'visualization': {
         'image_size': [2400, 1800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
-        'array': 'EpsIn',                    # REQUIRED: array to visualize
-        'out_array': 'in_epsilon',
-        'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.1e',             # '6.1e' | '6.2f'
+        'array': 'U',                    # REQUIRED: array to visualize
+        'out_array': 'vel',
+        'range': [0, 1.2],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [0, 0.2, 0.4, 0.6, 0.8, 1, 1.2],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.1f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
-        'show_axis': False,
+        'show_axis': True,
     },
     
 }
@@ -73,10 +73,10 @@ PROCESSING_OPTIONS = {
 }
 
 MPI = {
-    "enabled": True,                   # set False to run serial
-    "launcher": "mpiexec",             # "mpiexec" | "srun" | etc.
-    "n": 16,                            # number of ranks
-    "extra_args": []                   # e.g. ["--bind-to","core"]
+    "enabled": True,                                                          # set False to run serial
+    "launcher": "mpiexec",                                                    # "mpiexec" | "srun" | etc.
+    "n": int(os.environ.get("SLURM_NTASKS", "32")),                           # number of ranks
+    "extra_args": []                                                          # e.g. ["--bind-to","core"]
 }
 # -------------------------------
 # Child pvpython script (string)
@@ -106,7 +106,10 @@ def main():
 
     # Load dataset
     src = pick_reader(fname, cfg)
+    src = src_update_with_time(src, cfg)
     pnames, cnames = list_point_cell_arrays(src)
+    print("pnames:", pnames)
+    print("cnames:", cnames)
     info = src.GetDataInformation()
     npts, ncel = info.GetNumberOfPoints(), info.GetNumberOfCells()
     print(f"[pvpython-child] Points: {npts}  Cells: {ncel}")
@@ -134,7 +137,7 @@ def main():
     #src = apply_isovolume(src, cfg)
     
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
-    #src = flatten_dataset(src)
+    src = flatten_dataset(src)
     
     try:
         base = vis_array
@@ -220,6 +223,37 @@ def main():
 
     print("[pvpython-child] Completed successfully.")
     return 0
+    
+def src_update_with_time(src, cfg):
+    
+    scene = GetAnimationScene()
+    scene.UpdateAnimationUsingDataTimeSteps()
+
+    # discover available times
+    tk = GetTimeKeeper()
+    times = list(getattr(tk, "TimestepValues", []) or [])
+    if not times:
+       times = list(getattr(src, "TimestepValues", []) or [])
+
+    # choose a safe start time
+    cfg_vis_start = (cfg.get("start_time")  # you set this in your config when you want t=2.4, say
+                 if isinstance(cfg.get("start_time"), (int, float)) else None)
+
+    if cfg_vis_start is not None:
+        # pick the first available timestep >= requested start
+        start_t = next((tt for tt in times if tt >= cfg_vis_start), times[-1] if times else 0.0)
+    else:
+        start_t = times[0] if times else 0.0
+
+    # move the scene *and* force the reader to execute at that time
+    scene.AnimationTime = start_t
+    try:
+       src.UpdatePipeline(time=start_t)
+    except Exception:
+       src.UpdatePipeline()
+
+    print(f"[pvpython-child] Primed pipeline at t={start_t}")
+    return src
 
 def out_flux(src, cfg, effective_vis_array):
     flux_dat = cfg.get("output_directory") + "/" + "eflux_x25.dat"
@@ -1075,7 +1109,11 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             view.AxesGrid.XAxisLabels = xlim.tolist()
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
-            view.AxesGrid.ZAxisLabels = [np.round(zmin,2), 0 , zmax]
+            view.AxesGrid.ZAxisLabels = [np.round(zmin,1), np.round((zmax -zmin)/2,1) , np.round(zmax,1)]
+            view.AxesGrid.XTitleFontSize = 16
+            view.AxesGrid.XLabelFontSize = 14
+            view.AxesGrid.ZTitleFontSize = 16
+            view.AxesGrid.ZLabelFontSize = 14
 
     try:
         view.ResetCamera(False)  # keep our orientation, just fit
@@ -1652,6 +1690,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
         # show & color
         disp = Show(src, view)
+        
         view.Update()
 
         # optional: orient camera (XZ by default)
