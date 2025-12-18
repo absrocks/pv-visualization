@@ -1151,6 +1151,11 @@ def _apply_preset_safe(lut, preset, view, vis):
         try:
             sb = GetScalarBar(lut, view)
             if sb is not None:
+                sb.ScalarBarLength = 0.4
+                sb.ScalarBarLocation = 'AnyLocation'
+                length = sb.ScalarBarLength
+                sb.Position = [0.5 - length/2.0, 0.05]
+                sb.Orientation = 'Horizontal'
                 sb.AutomaticLabelFormat = 0
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
