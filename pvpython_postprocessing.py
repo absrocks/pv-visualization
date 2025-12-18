@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 2.4,        # None --> to start from 0
-    'end_time': 2.6,
+    'start_time': 0,        # None --> to start from 0
+    'end_time': 10,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -45,8 +45,8 @@ INPUT_PARAMETERS = {
     'openfoam': {
         'mode': 'decomposed',                                        # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],                            # or [] / None
-        'cell_arrays':  ['U', 'alpha.water', 'EpsAvg', 'EpsIn'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water', 'EpsAvg', 'EpsIn'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
@@ -54,10 +54,10 @@ INPUT_PARAMETERS = {
         'image_size': [2400, 1800],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'vel',
-        'range': [0, 1.2],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [0, 0.2, 0.4, 0.6, 0.8, 1, 1.2],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.1f',             # '6.1e' | '6.2f'
+        'out_array': 'calc_eps',
+        'range': [0, 1],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
@@ -141,7 +141,19 @@ def main():
     
     try:
         base = vis_array
-        
+        if 'vel' in cfg.get("visualization")["out_array"]:
+            src, vel = apply_spanwise_average(src, axis_letter=axis_letter, array_name="U")
+            print(f"[pvpython-child] Calculated array: {vel}")
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
+            effective_vis_array = vel
+        if 'calc_eps' in cfg.get("visualization")["out_array"]:
+            src, grad_name = apply_gradient(src, base)
+            src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon', turbulence='OFF')
+            effective_vis_array = eps_name
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
+            effective_vis_array = eps_name
         if 'in_eps' in cfg.get("visualization")["out_array"]:
             src, eps_name_in = apply_spanwise_average(src, axis_letter=axis_letter, array_name="EpsIn")
             print(f"[pvpython-child] Calculated array: {eps_name_in}")
@@ -168,7 +180,7 @@ def main():
             src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
             src, grad_name = apply_gradient(src, prime_name)
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
-            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon', turbulence='OFF')
             effective_vis_array = eps_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             
@@ -1109,14 +1121,14 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             view.AxesGrid.XAxisLabels = xlim.tolist()
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
-            view.AxesGrid.ZAxisLabels = [np.round(zmin,1), np.round((zmax -zmin)/2,1) , np.round(zmax,1)]
-            view.AxesGrid.XTitleFontSize = 16
-            view.AxesGrid.XLabelFontSize = 14
-            view.AxesGrid.ZTitleFontSize = 16
-            view.AxesGrid.ZLabelFontSize = 14
+            view.AxesGrid.ZAxisLabels = [np.round(zmin,1), np.round((zmax -zmin)/2,1) , np.round(zmax,2)]
+            view.AxesGrid.XTitleFontSize = 20
+            view.AxesGrid.XLabelFontSize = 18
+            view.AxesGrid.ZTitleFontSize = 20
+            view.AxesGrid.ZLabelFontSize = 18
 
     try:
-        view.ResetCamera(False)  # keep our orientation, just fit
+        view.ResetCamera(False)  
     except Exception:
         pass
     
@@ -1147,7 +1159,7 @@ def _apply_preset_safe(lut, preset, view, vis):
                 sb.LabelFormat = '%-#'+vis.get("label_format") #'%-#6.1e'
                 sb.RangeLabelFormat = '%-#'+vis.get("label_format") #'%-#6.1e'
                 if "eps" in vis.get("out_array"):
-                    sb.Title='$\\epsilon$'
+                    sb.Title=r'$\epsilon$'
                     
         except Exception:
             # Ignore if scalar bar isn't available/visible yet
@@ -1518,7 +1530,7 @@ def apply_gradient(src, array_name, assoc=None, opts=None):
     grad.UpdatePipeline()
     return grad, result_name
 
-def calculate_epsilon(src, s2_array, axis_letter='Y', result_name='eps', nut_name='nut', nu=1e-6):
+def calculate_epsilon(src, s2_array, axis_letter='Y', result_name='eps', nut_name='nut', nu=1e-6, turbulence="ON"):
     """
     Compute epsilon = <2*nut*S2>_axis + <2*nu*S2>_axis, where S2 is a scalar array (e.g., from strain-rate).
     Returns: (src_with_eps, result_name)
@@ -1553,7 +1565,10 @@ def calculate_epsilon(src, s2_array, axis_letter='Y', result_name='eps', nut_nam
     # --- sum the averaged parts into final epsilon ---
     calc_sum = Calculator(Input=calc_m)
     calc_sum.ResultArrayName = result_name
-    calc_sum.Function = f"{eps_t_avg}+{eps_m_avg}"
+    if turbulence == "ON":
+        calc_sum.Function = f"{eps_t_avg}+{eps_m_avg}"
+    else:
+        calc_sum.Function = f"{eps_m_avg}"
     calc_sum.UpdatePipeline()
 
     return calc_sum, result_name
