@@ -55,7 +55,7 @@ INPUT_PARAMETERS = {
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
         'out_array': 'calc_eps',
-        'range': [0, 1],                  # e.g., [0.0, 5.0]; None = auto
+        'range': [1e-5, 1e-1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
@@ -1151,12 +1151,14 @@ def _apply_preset_safe(lut, preset, view, vis):
         try:
             sb = GetScalarBar(lut, view)
             if sb is not None:
+                sb.AutoOrient = 0
+                sb.Orientation = 'Horizontal'
                 sb.ScalarBarLength = 0.4
                 sb.ScalarBarLocation = 'AnyLocation'
                 length = sb.ScalarBarLength
                 sb.Position = [0.5 - length/2.0, 0.05]
-                sb.Orientation = 'Horizontal'
                 sb.AutomaticLabelFormat = 0
+                sb.TitleFontSize = 24
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
                     sb.CustomLabels=vis.get("custom_label")
