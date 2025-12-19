@@ -25,7 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 0,        # None --> to start from 0
+    'start_time': 9.8,        # None --> to start from 0
     'end_time': 10,
 
     # ---- Averaging Options ----
@@ -51,7 +51,7 @@ INPUT_PARAMETERS = {
 
     # ---- Visualization options ----
     'visualization': {
-        'image_size': [2400, 1800],          # [width, height]
+        'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
         'out_array': 'calc_eps',
@@ -993,12 +993,12 @@ def vis_slice_axis(src, axis_letter, loc=None):
     try:
         annotateTimeFilter1Display.Set(
             WindowLocation='Upper Center',
-            FontSize=24,
+            FontSize=48,
         )
     except Exception:
         try:
             annotateTimeFilter1Display.WindowLocation = 'Upper Center'
-            annotateTimeFilter1Display.FontSize = 24
+            annotateTimeFilter1Display.FontSize = 48
         except Exception:
             raise RuntimeError("Couldn't set the Time Filter Option")
             
@@ -1111,6 +1111,7 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
         view.CameraViewUp = [0, 0, 1]
         view.CameraFocalDisk = 1.0
         view.CameraParallelProjection = 1
+        view.CameraParallelScale = 1.2
         if cfg.get("visualization")["show_axis"] is True:
             # Set Axis
             view.AxesGrid.Visibility = 1
@@ -1122,10 +1123,10 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             
             view.AxesGrid.ZAxisUseCustomLabels = 1
             view.AxesGrid.ZAxisLabels = [np.round(zmin,1), np.round((zmax -zmin)/2,1) , np.round(zmax,2)]
-            view.AxesGrid.XTitleFontSize = 20
-            view.AxesGrid.XLabelFontSize = 18
-            view.AxesGrid.ZTitleFontSize = 20
-            view.AxesGrid.ZLabelFontSize = 18
+            view.AxesGrid.XTitleFontSize = 30
+            view.AxesGrid.XLabelFontSize = 27
+            view.AxesGrid.ZTitleFontSize = 30
+            view.AxesGrid.ZLabelFontSize = 27
 
     try:
         view.ResetCamera(False)  
@@ -1156,9 +1157,9 @@ def _apply_preset_safe(lut, preset, view, vis):
                 sb.ScalarBarLength = 0.4
                 sb.ScalarBarLocation = 'AnyLocation'
                 length = sb.ScalarBarLength
-                sb.Position = [0.5 - length/2.0, 0.05]
-                sb.AutomaticLabelFormat = 0
+                sb.Position = [0.5 , 0.2]
                 sb.TitleFontSize = 24
+                sb.AutomaticLabelFormat = 0
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
                     sb.CustomLabels=vis.get("custom_label")
