@@ -25,7 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 9.8,        # None --> to start from 0
+    'start_time': 2,        # None --> to start from 0
     'end_time': 10,
 
     # ---- Averaging Options ----
@@ -33,7 +33,7 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': True,      # set False to disable
+        'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 0.0,
         'Xmax': 10.0,
@@ -55,7 +55,7 @@ INPUT_PARAMETERS = {
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
         'out_array': 'calc_eps',
-        'range': [1e-5, 1e-1],                  # e.g., [0.0, 5.0]; None = auto
+        'range': [1e-5, 0.1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
@@ -75,7 +75,7 @@ PROCESSING_OPTIONS = {
 MPI = {
     "enabled": True,                                                          # set False to run serial
     "launcher": "mpiexec",                                                    # "mpiexec" | "srun" | etc.
-    "n": int(os.environ.get("SLURM_NTASKS", "32")),                           # number of ranks
+    "n": int(os.environ.get("SLURM_NTASKS", "64")),                           # number of ranks
     "extra_args": []                                                          # e.g. ["--bind-to","core"]
 }
 # -------------------------------
@@ -133,16 +133,13 @@ def main():
         
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
     
-    # Apply IsoVolume
-    #src = apply_isovolume(src, cfg)
-    
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
     
     try:
         base = vis_array
         if 'vel' in cfg.get("visualization")["out_array"]:
-            src, vel = apply_spanwise_average(src, axis_letter=axis_letter, array_name="U")
+            src, vel = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
             print(f"[pvpython-child] Calculated array: {vel}")
             src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
             effective_vis_array = vel
@@ -1152,13 +1149,12 @@ def _apply_preset_safe(lut, preset, view, vis):
         try:
             sb = GetScalarBar(lut, view)
             if sb is not None:
-                sb.AutoOrient = 0
-                sb.Orientation = 'Horizontal'
-                sb.ScalarBarLength = 0.4
+                #sb.AutoOrient = 0
+                #sb.Orientation = 'Horizontal'
+                #sb.ScalarBarLength = 0.4
                 sb.ScalarBarLocation = 'AnyLocation'
-                length = sb.ScalarBarLength
-                sb.Position = [0.5 , 0.2]
-                sb.TitleFontSize = 24
+                #length = sb.ScalarBarLength
+                #sb.Position = [0.2 , 0.4]
                 sb.AutomaticLabelFormat = 0
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
@@ -1168,11 +1164,13 @@ def _apply_preset_safe(lut, preset, view, vis):
                 sb.RangeLabelFormat = '%-#'+vis.get("label_format") #'%-#6.1e'
                 if "eps" in vis.get("out_array"):
                     sb.Title=r'$\epsilon$'
-                    
-        except Exception:
-            # Ignore if scalar bar isn't available/visible yet
-            pass
-    return True
+                sb.TitleFontSize = 30
+                sb.LabelFontSize = 27
+                view.update()
+        except Exception as e:
+            print(f"An exception was caught: {e}")
+            raise
+    return view
 
 def find_array_assoc(src, name):
     """Return ('POINTS'|'CELLS', ncomp) for the first match of array `name`."""
@@ -1734,7 +1732,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         lut = GetColorTransferFunction(arr)
         if "eps" in out_array:
             lut.UseLogScale=1
-        _apply_preset_safe(lut, str(cmap), view, vis)
+        view = _apply_preset_safe(lut, str(cmap), view, vis)
         if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
             r0, r1 = float(rng[0]), float(rng[1])
             if not (r1 > r0):
