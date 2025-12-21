@@ -1132,7 +1132,7 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     
 
 def _apply_preset_safe(lut, preset, view, vis):
-    #print("vis",vis)
+
     tried = [preset, preset.title(), preset.upper(), preset.capitalize()]
     for name in tried:
         try:
@@ -1170,7 +1170,7 @@ def _apply_preset_safe(lut, preset, view, vis):
         except Exception as e:
             print(f"An exception was caught: {e}")
             raise
-    return view
+    return True
 
 def find_array_assoc(src, name):
     """Return ('POINTS'|'CELLS', ncomp) for the first match of array `name`."""
@@ -1732,7 +1732,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         lut = GetColorTransferFunction(arr)
         if "eps" in out_array:
             lut.UseLogScale=1
-        view = _apply_preset_safe(lut, str(cmap), view, vis)
+        _apply_preset_safe(lut, str(cmap), view, vis)
         if rng and isinstance(rng, (list, tuple)) and len(rng) == 2:
             r0, r1 = float(rng[0]), float(rng[1])
             if not (r1 > r0):
