@@ -25,7 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 2,        # None --> to start from 0
+    'start_time': 9.8,        # None --> to start from 0
     'end_time': 10,
 
     # ---- Averaging Options ----
@@ -1149,12 +1149,12 @@ def _apply_preset_safe(lut, preset, view, vis):
         try:
             sb = GetScalarBar(lut, view)
             if sb is not None:
-                #sb.AutoOrient = 0
-                #sb.Orientation = 'Horizontal'
-                #sb.ScalarBarLength = 0.4
-                sb.ScalarBarLocation = 'AnyLocation'
-                #length = sb.ScalarBarLength
-                #sb.Position = [0.2 , 0.4]
+                sb.AutoOrient = 0
+                sb.Orientation = 'Horizontal'
+                sb.ScalarBarLength = 0.4
+                sb.WindowLocation = 'Any Location'
+                length = sb.ScalarBarLength
+                sb.Position = [length - 0.1, 0.2]
                 sb.AutomaticLabelFormat = 0
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
@@ -1166,7 +1166,7 @@ def _apply_preset_safe(lut, preset, view, vis):
                     sb.Title=r'$\epsilon$'
                 sb.TitleFontSize = 30
                 sb.LabelFontSize = 27
-                view.update()
+                
         except Exception as e:
             print(f"An exception was caught: {e}")
             raise
