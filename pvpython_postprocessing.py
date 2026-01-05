@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 9,        # None --> to start from 0
-    'end_time': 9.2,
+    'start_time': 10,        # None --> to start from 0
+    'end_time': 14,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -54,7 +54,7 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'turb_eps_streamwise',
+        'out_array': 'turb_eps',
         'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
@@ -231,8 +231,8 @@ def main():
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = out_flux(src, cfg, effective_vis_array)
         if 'streamwise' in cfg.get("visualization")["out_array"]:
-            src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=eps_name, mode='bins')
-            effective_vis_array = eps_depth
+            src, in_eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
+            effective_vis_array = in_eps_depth
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = apply_slices(src, "Y")
             pnames, cnames = list_point_cell_arrays(src)
@@ -254,11 +254,11 @@ def main():
         
                 streamwise_profile_save(
                     src,
-                    array_name=eps_depth,          # e.g., "U_avg_Z"
+                    array_name=effective_vis_array,          # e.g., "U_avg_Z"
                     slope_deg=30.0,
                     n_samples=1000,
                     path="out/csv/",
-                    fname=f"eps_depth_Z_stream_t_{str(t)}.csv",
+                    fname=f"in_eps_depth_Z_stream_t_{str(t)}.csv",
                     use_magnitude=False)
                 
             
@@ -425,7 +425,8 @@ def streamwise_profile_save(xz_slice,
         calcM.UpdatePipeline()
         src_for_save = calcM
         target_col = calcM.ResultArrayName
-    os.makedirs(os.path.join(path,target_col), exist_ok=True)
+    path = os.path.join(path,target_col)
+    os.makedirs(path, exist_ok=True)
     # 5) Save exactly two columns: X and your chosen column
     try:
         SaveData(os.path.join(path, fname),
