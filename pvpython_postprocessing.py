@@ -25,7 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 9.8,        # None --> to start from 0
+    'start_time': 9,        # None --> to start from 0
     'end_time': 10,
 
     # ---- Averaging Options ----
@@ -33,9 +33,9 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': False,      # set False to disable
+        'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 0.0,
+        'Xmin': 7.0,
         'Xmax': 10.0,
     },
     'slice': {
@@ -54,9 +54,9 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'calc_eps',
-        'range': [1e-5, 0.1],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'out_array': 'turb_eps_streamwise',
+        'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
@@ -160,26 +160,33 @@ def main():
             effective_vis_array = [eps_name_in, eps_name_avg]
             
         if 'k' in cfg.get("visualization")["out_array"]:
-            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
-            print(f"[pvpython-child] Calculated array: {avg_name}")
-            # Compute average
-            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
             print(f"[pvpython-child] TKE output will be written")
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"Calculated array: {avg_name}")
+            # Compute average
             prime_name = f"{base}_prime_{axis_letter}"
-            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
+            print(f"Calculated array: {prime_name}")
             src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
             effective_vis_array = k_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
         
         if 'turb_eps' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Epsilon output will be written")
+            src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
+            print(f"Calculated array: {avg_name}")
             prime_name = f"{base}_prime_{axis_letter}"
-            src = add_fluctuation(src, base_array="U", avg_array=avg_name, out_name=prime_name)
+            src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
+            print(f"Calculated array: {prime_name}")
             src, grad_name = apply_gradient(src, prime_name)
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
-            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon', turbulence='OFF')
+            #print(f"Calculated array: {S2}")
+            src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon_turb', turbulence='ON')
+            
             effective_vis_array = eps_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
             
         if 'energy' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Energy output will be written")
@@ -193,6 +200,7 @@ def main():
             
             effective_vis_array = [k_name, eps_name, ke, None]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
+            
         if 'flux' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Flux output will be written")
             prime_name = f"{base}_prime_{axis_letter}"
@@ -222,8 +230,39 @@ def main():
             effective_vis_array = [flux, flux_eps]
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = out_flux(src, cfg, effective_vis_array)
-        else:
+        if 'streamwise' in cfg.get("visualization")["out_array"]:
+            src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=eps_name, mode='bins')
+            effective_vis_array = eps_depth
+            print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = apply_slices(src, "Y")
+            pnames, cnames = list_point_cell_arrays(src)
+            print("pnames:", pnames)
+            print("cnames:", cnames)
+            
+            tk = GetTimeKeeper()
+            times = list(getattr(tk, "TimestepValues", []) or [])
+            tmin = cfg.get("start_time", None)
+            tmax = cfg.get("end_time", None)
+            for t in times:
+                if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
+                    continue
+                GetAnimationScene().AnimationTime = t
+                try:
+                    src.UpdatePipeline(time=t)
+                except Exception:
+                    src.UpdatePipeline()
+        
+                streamwise_profile_save(
+                    src,
+                    array_name=eps_depth,          # e.g., "U_avg_Z"
+                    slope_deg=30.0,
+                    n_samples=1000,
+                    path=
+                    out_path="out/csv/eps_depth_Z_stream_t_{t}.csv",
+                    use_magnitude=False)
+                
+            
+        else:
             color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
         
     except Exception as e:
@@ -301,6 +340,222 @@ def out_flux(src, cfg, effective_vis_array):
           flush=True)
     return src
 
+def streamwise_profile_save(xz_slice,
+                                array_name,
+                                slope_deg=30.0,
+                                n_samples=1000,
+                                y0=None,
+                                z0=None,
+                                folder=None,
+                                fname=None,
+                                use_magnitude=False,
+                                component=None):
+                                
+    import math
+    """
+    Resample `array_name` along a sloped line in XZ and write a 2-column .dat:
+      col1 = X, col2 = array (scalar, chosen component, or magnitude)
+
+    Line endpoints:
+      P1 = (xmin, y0, z0)
+      P2 = (xmax, y0, z0 + tan(slope_deg)*(xmax-xmin))
+
+    Args:
+      xz_slice    : proxy of your XZ slice (after Z-average)
+      array_name  : name of array to export
+      slope_deg   : line slope in degrees in XZ
+      n_samples   : points along the line
+      y0, z0      : defaults to mid-Y and zmin of slice bounds
+      out_path    : e.g. "epsilon_turb_avg_Z.dat"
+      use_magnitude : if True and array is vector/tensor, output magnitude
+      component   : if not None, pick component index (0/1/2...) instead of magnitude
+
+    Returns: the final proxy that SaveData wrote.
+    """
+    # Ensure slice is up-to-date and get bounds
+    try: xz_slice.UpdatePipeline()
+    except Exception: pass
+    xmin, xmax, ymin, ymax, zmin, zmax = xz_slice.GetDataInformation().GetBounds()
+
+    if y0 is None: y0 = 0.5*(ymin+ymax)
+    if z0 is None: z0 = zmin
+    dz = math.tan(math.radians(float(slope_deg))) * (xmax - xmin)
+
+    # 1) Destination geometry: a straight line in XZ
+    line = Line()
+    line.Point1 = [float(xmin), float(y0), float(z0)]
+    line.Point2 = [float(xmax), float(y0), float(z0 + dz)]
+    line.Resolution = int(n_samples)
+
+    # 2) Resample source arrays onto the line (reliable transfer)
+    rs = ResampleWithDataset(registrationName='ResampleWithDataset1', SourceDataArrays=xz_slice, DestinationMesh=line)
+    rs.PassPointArrays = 1
+    rs.PassCellArrays  = 0    # usually you want point data here
+    rs.UpdatePipeline()
+
+    # 3) Create an 'X' column explicitly
+    calcX = Calculator(Input=rs)
+    calcX.AttributeType   = 'Point Data'
+    calcX.ResultArrayName = 'X'
+    calcX.Function        = 'coordsX'
+    calcX.UpdatePipeline()
+
+    src_for_save = calcX
+
+    # 4) If you need magnitude or a specific component, create that column
+    target_col = array_name
+    if component is not None:
+        # Extract component i -> new column "<name>_c<i>"
+        calcC = Calculator(Input=src_for_save)
+        calcC.AttributeType   = 'Point Data'
+        calcC.ResultArrayName = f"{array_name}_c{int(component)}"
+        # Vector component selection via [] (ParaView supports v[0], v[1], v[2])
+        calcC.Function        = f'{array_name}[{int(component)}]'
+        calcC.UpdatePipeline()
+        src_for_save = calcC
+        target_col = calcC.ResultArrayName
+    elif use_magnitude:
+        # Magnitude -> "<name>_Magnitude"
+        calcM = Calculator(Input=src_for_save)
+        calcM.AttributeType   = 'Point Data'
+        calcM.ResultArrayName = f"{array_name}_Magnitude"
+        # Quote array name to be safe if it has dots
+        qn = f'"{array_name}"' if any(c in array_name for c in '.: ') else array_name
+        calcM.Function        = f"mag({qn})"
+        calcM.UpdatePipeline()
+        src_for_save = calcM
+        target_col = calcM.ResultArrayName
+    os.makedirs(folder, exist_ok=True)
+    # 5) Save exactly two columns: X and your chosen column
+    try:
+        SaveData(os.path.join(folder, fname),
+                 proxy=src_for_save,
+                 ChooseArraysToWrite= 0,
+                 FieldAssociation='Point Data',
+                 PointDataArrays=['X', target_col],
+                 CellDataArrays= [],
+                 UseScientificNotation=1,
+                 Precision=16,
+                 AddTime=0)
+    except TypeError:
+        # older ParaView: minimal args
+        SaveData(out_path, proxy=src_for_save)
+    print(f"[profile] wrote 2-column (X, {target_col}) to {out_path}")
+    return src_for_save
+    
+def streamwise_profile_via_line(xz_slice,
+                                array_name,
+                                slope_deg=30.0,
+                                n_samples=1000,
+                                y0=None,
+                                z0=None,
+                                out_path="profile.dat",
+                                use_magnitude=True):
+    """
+    Sample `array_name` along a sloped line in the XZ plane and write a 2-column .dat:
+      col1 = X, col2 = array value (magnitude by default)
+
+    Line endpoints:
+      P1 = (xmin, y0, z0)
+      P2 = (xmax, y0, z0 + tan(slope_deg)*(xmax-xmin))
+
+    Args:
+      xz_slice   : proxy of your XZ slice (after Z-average)
+      array_name : name of the array to sample (point data recommended)
+      slope_deg  : slope angle in degrees (30° → tan ≈ 0.57735)
+      n_samples  : number of samples along the line
+      y0, z0     : if None, use the mid-Y and min-Z of the slice bounds
+      out_path   : output path (e.g., "UavgZ_stream.dat")
+      use_magnitude : if array is multi-component, use magnitude if True
+
+    Returns: (table_proxy, out_path)
+    """
+    import math
+    # Ensure bounds are current
+    try:
+        xz_slice.UpdatePipeline()
+    except Exception:
+        pass
+
+    b = xz_slice.GetDataInformation().GetBounds()  # (xmin,xmax,ymin,ymax,zmin,zmax)
+    xmin, xmax, ymin, ymax, zmin, zmax = b
+    print("ymin:",ymin, "ymax:", ymax)
+    if y0 is None:
+        y0 = 0.5*(ymin + ymax)
+    if z0 is None:
+        z0 = zmin
+    print("y0:", float(y0))
+    print("z0:", float(z0))
+    
+    dz = math.tan(math.radians(float(slope_deg))) * (xmax - xmin)
+    print("dz:", float(dz))
+    # 1) Sample along the line
+    line = PlotOverLine(Input=xz_slice)
+    line.PassPointArrays = 1
+    line.Point1 = [float(xmin), float(y0), float(z0)]
+    line.Point2 = [float(xmax), float(y0), float(z0 + dz)]
+    #line.SeriesVisibility = [array_name]
+    line.Resolution = int(n_samples)
+    line.UpdatePipeline()
+
+    # 2) Make a tiny table with just X and the selected array (mag if needed)
+    pf = ProgrammableFilter(Input=line)
+    pf.OutputDataSetType = 'vtkTable'
+    pf.Script = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+from vtkmodules.vtkCommonDataModel import vtkTable
+import numpy as np
+
+inp  = self.GetInputDataObject(0,0)
+wrap = dsa.WrapDataObject(inp)
+
+pts = wrap.Points
+pd  = wrap.PointData
+
+name = "__ARRAY__"
+if name not in pd.keys():
+    raise RuntimeError("Array '%s' not found on PointData of PlotOverLine output." % name)
+
+x = np.asarray(pts[:,0], float)
+
+arr = np.asarray(pd[name])
+if arr.ndim == 1:
+    vals = arr.astype(float)
+else:
+    arr = arr.reshape(arr.shape[0], -1)
+    if __USE_MAG__:
+        vals = np.linalg.norm(arr, axis=1)
+    else:
+        # if not magnitude, take component 0 by default; change here if you want another comp
+        vals = arr[:,0]
+
+# Build vtkTable with two columns: X and name
+table = vtkTable()
+cx = ns.numpy_to_vtk(x.copy(), deep=1); cx.SetName("X")
+cv = ns.numpy_to_vtk(vals.copy(), deep=1); cv.SetName(name)
+table.GetRowData().AddArray(cx)
+table.GetRowData().AddArray(cv)
+
+self.GetOutputDataObject(0).ShallowCopy(table)
+""".replace("__ARRAY__", str(array_name)
+).replace("__USE_MAG__", "True" if use_magnitude else "False")
+    pf.UpdatePipeline()
+
+    # 3) Save as .dat (space-delimited; ParaView may default to comma on some builds)
+    try:
+        SaveData(out_path, proxy=pf,
+                 UseScientificNotation=1,
+                 Precision=16,
+                 FieldAssociation='Row Data',
+                 AddTime=0)
+    except TypeError:
+        # Older ParaView: minimal args
+        SaveData(out_path, proxy=pf)
+
+    print(f"[profile] wrote 2-column streamwise profile to {out_path}")
+    return pf, out_path
+    
 def calculate_magnitude(src, array_name):
     """
     If `array_name` has >1 components, create <name>_Magnitude via Calculator.
@@ -507,7 +762,78 @@ def fetch_integrals(src, arrays, components=None, return_average=False):
 
     return results, measure, missing
 
+def eps_streamwise(src, array_name='U', assoc=None):
+    """
+    ProgrammableFilter that fetches X-coordinates and the given array.
+    Prints a short sample of x to verify streamwise access.
+    Returns the PF proxy (output is a shallow copy of the input).
+    """
+    # auto-detect association if not provided
+    if assoc is None:
+        pnames, cnames = list_point_cell_arrays(src)
+        if array_name in pnames:
+            assoc = "POINTS"
+        elif array_name in cnames:
+            assoc = "CELLS"
+        else:
+            raise RuntimeError(f"eps_streamwise: '{array_name}' not found "
+                               f"(POINTS={pnames}; CELLS={cnames}).")
+    assoc = assoc.upper()
 
+    PF_TEMPLATE = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+import numpy as np
+
+inp = self.GetInputDataObject(0, 0)
+if inp is None:
+    raise RuntimeError("No input dataset.")
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+
+wrap = dsa.WrapDataObject(inp)
+
+# Choose data association
+assoc = "__ASSOC__"
+data = wrap.PointData if assoc == "POINTS" else wrap.CellData
+
+name = "__ARRAY__"
+if name not in data.keys():
+    raise RuntimeError("Array '%s' not found on %s." % (name, assoc))
+
+A = np.asarray(data[name])
+# Normalize to (N, C)
+if A.ndim == 0:
+    A = A.reshape(1, 1)
+elif A.ndim == 1:
+    A = A.reshape(-1, 1)
+
+# Coordinates
+pts = wrap.Points
+if pts is None or pts.shape[0] == 0:
+    raise RuntimeError("Dataset has no points.")
+xyz = np.asarray(pts, dtype=float)
+x = xyz[:, 0]
+
+# Print a tiny sample so logs stay readable
+sample_n = min(8, x.size)
+print("[pf] x sample:", x[:sample_n])
+print("[pf] array '%s' shape:" % name, A.shape)
+"""
+
+    pf_code = (PF_TEMPLATE
+               .replace("__ARRAY__", array_name)
+               .replace("__ASSOC__", assoc))
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = pf_code
+    pf.RequestInformationScript = ""
+    pf.RequestUpdateExtentScript = ""
+    pf.PythonPath = ""
+    pf.UpdatePipeline()
+    return pf
+
+    
 def global_max_and_bounds_pf(src, cfg):
 
 
@@ -1154,7 +1480,7 @@ def _apply_preset_safe(lut, preset, view, vis):
                 sb.ScalarBarLength = 0.4
                 sb.WindowLocation = 'Any Location'
                 length = sb.ScalarBarLength
-                sb.Position = [length - 0.1, 0.2]
+                sb.Position = [length - 0.1, 0.1]
                 sb.AutomaticLabelFormat = 0
                 if vis.get("custom_label") is not None:
                     sb.UseCustomLabels = 1
@@ -1240,6 +1566,472 @@ def apply_isovolume(src, cfg, array_name=None, threshold_range=None):
 
     print(f"[pvpython-child] Applied IsoVolume on {assoc}:{field} in [{r0}, {r1}]")
     return iso
+
+def extract_streamwise_global(src, name, axis_letter='X', out_path=None):
+    """
+    Build a global X–profile (two columns: X, <name>) on ALL ranks using only
+    vtkMultiProcessController::AllReduce. No sm.Fetch, no mpi4py required.
+    """
+    axis_map = {'X':0,'Y':1,'Z':2}
+    A = axis_map.get(axis_letter.upper(), 0)
+
+    PF = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+from vtkmodules.vtkCommonDataModel import vtkTable
+from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
+from vtkmodules.vtkCommonCore import vtkDoubleArray
+import numpy as np
+
+def _pitch(u):
+    u = np.asarray(u, float).ravel()
+    if u.size < 3: return 1e-9
+    u = np.unique(np.sort(u))
+    if u.size < 3: return 1e-9
+    d = np.diff(u)
+    h = np.percentile(d, 20)
+    if not (np.isfinite(h) and h > 0):
+        h = np.median(d)
+        if not (np.isfinite(h) and h > 0): h = 1e-9
+    return float(h)
+
+# --- input / wrap ---
+inp  = self.GetInputDataObject(0,0)
+wrap = dsa.WrapDataObject(inp)
+pts  = wrap.Points
+pd   = wrap.PointData
+
+out = self.GetOutputDataObject(0)
+if pts is None or pts.shape[0] == 0:
+    out.ShallowCopy(vtkTable()); return
+
+name = "__ARRAY__"
+if name not in pd.keys():
+    raise RuntimeError("Array '%s' not found on PointData." % name)
+
+A = __AXIS_INDEX__
+x = np.asarray(pts[:, A], float)
+
+arr = np.asarray(pd[name])
+if arr.ndim == 1:
+    vals = arr.astype(float)
+else:
+    arr = arr.reshape(arr.shape[0], -1)
+    vals = np.linalg.norm(arr, axis=1)  # magnitude by default
+
+ctrl = vtkMultiProcessController.GetGlobalController()
+
+# ---- establish a COMMON pitch (dx) across ranks via MIN reduce
+dx_local = _pitch(x) if x.size else 1e30
+
+send = vtkDoubleArray(); send.SetNumberOfTuples(1); send.SetValue(0, float(dx_local))
+recv = vtkDoubleArray(); recv.SetNumberOfTuples(1)
+ctrl.AllReduce(send, recv, vtkCommunicator.MIN_OP)
+dx = float(recv.GetValue(0))
+#else:
+#    dx = float(dx_local)
+
+# ---- compute integer bin indices with that global dx
+ix = np.round(x / dx).astype(np.int64) if x.size else np.empty(0, dtype=np.int64)
+
+# ---- get global min/max index to define a shared bin range
+if ix.size:
+    local_min = float(ix.min())
+    local_max = float(ix.max())
+else:
+    local_min = +1e30
+    local_max = -1e30
+
+if ctrl:
+    send_min = vtkDoubleArray(); send_min.SetNumberOfTuples(1); send_min.SetValue(0, local_min)
+    recv_min = vtkDoubleArray(); recv_min.SetNumberOfTuples(1)
+    ctrl.AllReduce(send_min, recv_min, vtkCommunicator.MIN_OP)
+    gmin = int(recv_min.GetValue(0))
+
+    send_max = vtkDoubleArray(); send_max.SetNumberOfTuples(1); send_max.SetValue(0, local_max)
+    recv_max = vtkDoubleArray(); recv_max.SetNumberOfTuples(1)
+    ctrl.AllReduce(send_max, recv_max, vtkCommunicator.MAX_OP)
+    gmax = int(recv_max.GetValue(0))
+else:
+    gmin = int(local_min)
+    gmax = int(local_max)
+
+if gmax < gmin:
+    out.ShallowCopy(vtkTable()); return
+
+nb = int(gmax - gmin + 1)
+
+# ---- local sums/counts on this rank (aligned to [gmin..gmax])
+sum_local = np.zeros(nb, float)
+cnt_local = np.zeros(nb, float)
+if ix.size:
+    off = ix - gmin
+    sum_local += np.bincount(off, weights=vals, minlength=nb)[:nb]
+    cnt_local += np.bincount(off, minlength=nb)[:nb]
+
+# ---- AllReduce SUM of vectors (use vtkDoubleArray as transport)
+if ctrl:
+    send_sum = ns.numpy_to_vtk(sum_local.copy(), deep=1)
+    recv_sum = vtkDoubleArray(); recv_sum.SetNumberOfTuples(nb)
+    ctrl.AllReduce(send_sum, recv_sum, vtkCommunicator.SUM_OP)
+    sum_global = ns.vtk_to_numpy(recv_sum)
+
+    send_cnt = ns.numpy_to_vtk(cnt_local.copy(), deep=1)
+    recv_cnt = vtkDoubleArray(); recv_cnt.SetNumberOfTuples(nb)
+    ctrl.AllReduce(send_cnt, recv_cnt, vtkCommunicator.SUM_OP)
+    cnt_global = ns.vtk_to_numpy(recv_cnt)
+else:
+    sum_global = sum_local
+    cnt_global = cnt_local
+
+with np.errstate(divide='ignore', invalid='ignore'):
+    mean_vals = np.where(cnt_global > 0, sum_global / cnt_global, np.nan)
+
+x_bins = (gmin + np.arange(nb)) * dx
+
+# ---- build vtkTable (identical on all ranks)
+table = vtkTable()
+colX = ns.numpy_to_vtk(x_bins.copy(), deep=1); colX.SetName("X")
+colV = ns.numpy_to_vtk(mean_vals.copy(), deep=1); colV.SetName(name)
+table.GetRowData().AddArray(colX)
+table.GetRowData().AddArray(colV)
+
+out.ShallowCopy(table)
+"""
+    pf = ProgrammableFilter(Input=src)
+    pf.OutputDataSetType = 'vtkTable'
+    pf.Script = (PF
+                 .replace("__ARRAY__", name)
+                 .replace("__AXIS_INDEX__", str(A)))
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+
+    if out_path:
+        try:
+            SaveData(out_path, proxy=pf,
+                     UseScientificNotation=1, Precision=16,
+                     FieldAssociation='Row Data', AddTime=0)
+        except TypeError:
+            SaveData(out_path, proxy=pf)
+    return pf, out_path
+
+
+def check_z_flat_parallel(src, name, axis_letter='Z', mode='pitch', bins_perp=64):
+    """
+    Parallel-safe: no sm.Fetch. Prints global max std (per component) of `name`
+    along the averaging axis. Returns the ProgrammableFilter proxy.
+    """
+    axis_map = {'X':0,'Y':1,'Z':2}
+    A = axis_map.get(axis_letter.upper(), 2)
+    use_pitch = (str(mode).lower() == 'pitch')
+
+    PF = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.vtkParallelCore import vtkMultiProcessController, vtkCommunicator
+import numpy as np
+
+inp  = self.GetInputDataObject(0,0)
+wrap = dsa.WrapDataObject(inp)
+pts  = wrap.Points
+pd   = wrap.PointData
+if pts is None or pts.shape[0] == 0:
+    out = self.GetOutputDataObject(0); out.ShallowCopy(inp); return
+
+name = "__ARRAY__"
+if name not in pd.keys():
+    raise RuntimeError("Array '%s' not found on PointData." % name)
+
+A = __AXIS_INDEX__
+others = [i for i in (0,1,2) if i != A]
+u0 = np.asarray(pts[:, others[0]], float)
+u1 = np.asarray(pts[:, others[1]], float)
+s  = np.asarray(pts[:, A],           float)   # coordinate along averaged axis
+
+arr = np.asarray(pd[name])
+print("arr size", np.shape(arr))
+if arr.ndim == 1:
+    arr = arr.reshape(-1,1)
+else:
+    arr = arr.reshape(arr.shape[0], -1)
+C = arr.shape[1]
+
+def _pitch(u):
+    u = np.asarray(u, float).ravel()
+    if u.size < 3: return 1e-9
+    u = np.unique(np.sort(u))
+    if u.size < 3: return 1e-9
+    d = np.diff(u)
+    h = np.percentile(d, 20)
+    if not (np.isfinite(h) and h > 0):
+        h = np.median(d)
+        if not (np.isfinite(h) and h > 0): h = 1e-9
+    return float(h)
+
+if __USE_PITCH__:
+    du0 = _pitch(u0); du1 = _pitch(u1)
+    i0 = np.round(u0/du0).astype(np.int64)
+    i1 = np.round(u1/du1).astype(np.int64)
+else:
+    nb = int(__BINS__)
+    u0min,u0max = float(np.nanmin(u0)), float(np.nanmax(u0))
+    u1min,u1max = float(np.nanmin(u1)), float(np.nanmax(u1))
+    if not np.isfinite(u0min) or not np.isfinite(u0max) or u0max<=u0min: u0max = u0min+1e-9
+    if not np.isfinite(u1min) or not np.isfinite(u1max) or u1max<=u1min: u1max = u1min+1e-9
+    i0 = np.floor((u0-u0min)/(u0max-u0min)*nb).astype(np.int64)
+    i1 = np.floor((u1-u1min)/(u1max-u1min)*nb).astype(np.int64)
+    i0 = np.clip(i0,0,nb-1); i1 = np.clip(i1,0,nb-1)
+
+keys = (i0 << 21) ^ (i1 & ((1<<21)-1))
+uniq, inv = np.unique(keys, return_inverse=True)
+G = uniq.size
+
+# std along s (averaged axis) inside each group
+local_max = np.zeros(C, float)
+local_cnt = 0
+for g in range(G):
+    sel = (inv == g)
+    if sel.sum() < 2:
+        continue
+    s_g = s[sel]
+    D_g = arr[sel,:]
+    o = np.argsort(s_g)
+    D_g = D_g[o,:]
+    std = np.std(D_g, axis=0)   # std across different s (depths)
+    local_max = np.maximum(local_max, std)
+    local_cnt += 1
+
+# MPI reduce: global max std per component
+ctrl = vtkMultiProcessController.GetGlobalController()
+if ctrl:
+    for c in range(C):
+        local_max[c] = ctrl.AllReduce(local_max[c], vtkCommunicator.MAX_OP)
+    total_groups = ctrl.AllReduce(local_cnt, vtkCommunicator.SUM_OP)
+    rank = ctrl.GetLocalProcessId()
+else:
+    total_groups = local_cnt
+    rank = 0
+
+if rank == 0:
+    print(f"[zflat] array={name} axis={__AXIS_TXT__} mode={'pitch' if __USE_PITCH__ else 'bins'} "
+          f"groups={total_groups} global max std per comp = {local_max}")
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+"""
+    pf_code = (PF
+        .replace("__ARRAY__", name)
+        .replace("__AXIS_INDEX__", str(A))
+        .replace("__AXIS_TXT__", axis_letter.upper())
+        .replace("__USE_PITCH__", "True" if use_pitch else "False")
+        .replace("__BINS__", str(int(bins_perp)))
+    )
+
+    pf = ProgrammableFilter(Input=src)
+    pf.Script = pf_code
+    pf.UpdatePipeline()
+    return pf
+
+def apply_directional_average(src, axis_letter='Z', array_name='U',
+                              bins_perp=64, mode='pitch'):
+    """
+    Average `array_name` along axis_letter ∈ {'X','Y','Z'}.
+    Output array: {array_name}_avg_<AXIS> on POINTS.
+
+    - mode='pitch': group columns by rounding the two perpendicular coordinates to
+      the lateral grid pitch (robust on structured/sloped meshes).
+    - mode='bins' : group by fixed bins_perp × bins_perp in the perpendicular plane.
+
+    Inside each group, points are sorted along the averaged axis and a trapezoidal
+    (Δs-weighted) mean is computed, so non-uniform spacing is handled correctly.
+    """
+    axis_map = {'X': 0, 'Y': 1, 'Z': 2}
+    A = axis_map.get(axis_letter.upper(), 1)
+
+    # Ensure we have a flat, point-associated array
+    src_pts = ensure_points_for_array(src, array_name)
+
+    if str(mode).lower() == 'pitch':
+        PF_TEMPLATE = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+import numpy as np
+
+def _pitch(u):
+    u = np.asarray(u, float).ravel()
+    if u.size < 3:
+        return 1e-9
+    u = np.unique(np.sort(u))
+    if u.size < 3:
+        return 1e-9
+    d = np.diff(u)
+    # robust percentile to avoid occasional large gaps
+    h = np.percentile(d, 20)
+    if not (np.isfinite(h) and h > 0):
+        h = np.median(d)
+        if not (np.isfinite(h) and h > 0):
+            h = 1e-9
+    return float(h)
+
+inp = self.GetInputDataObject(0,0)
+if inp is None:
+    raise RuntimeError("No input dataset.")
+
+wrap = dsa.WrapDataObject(inp)
+pts  = wrap.Points
+if pts is None or pts.shape[0] == 0:
+    raise RuntimeError("No points on input.")
+
+pd = wrap.PointData
+name = "__ARRAY__"
+if name not in pd.keys():
+    raise RuntimeError("Array '%s' not found in PointData." % name)
+
+# data as (N,C)
+data = np.asarray(pd[name])
+if data.ndim == 1:
+    data = data.reshape(-1,1)
+else:
+    data = data.reshape(data.shape[0], -1)
+
+A = __AXIS_INDEX__
+others = [i for i in (0,1,2) if i != A]
+u0 = np.asarray(pts[:, others[0]], dtype=float)
+u1 = np.asarray(pts[:, others[1]], dtype=float)
+s  = np.asarray(pts[:, A],           dtype=float)   # coordinate along averaging axis
+
+# grid-pitch keys for the two perpendicular axes
+du0 = _pitch(u0); du1 = _pitch(u1)
+i0 = np.round(u0 / du0).astype(np.int64)
+i1 = np.round(u1 / du1).astype(np.int64)
+keys = (i0 << 21) ^ (i1 & ((1<<21)-1))
+uniq, inv = np.unique(keys, return_inverse=True)
+G = uniq.size; C = data.shape[1]
+
+# trapezoidal, Δs-weighted mean within each group
+avg = np.empty_like(data, dtype=float)
+for g in range(G):
+    sel = (inv == g)
+    if not np.any(sel):
+        continue
+    s_g = s[sel]
+    D_g = data[sel,:]  # (Ng, C)
+    o = np.argsort(s_g)
+    s_g = s_g[o]; D_g = D_g[o,:]
+    if s_g.size == 1:
+        avg_g = D_g[0,:]
+    else:
+        ds = np.diff(s_g)                     # (Ng-1,)
+        integ = ((D_g[:-1,:] + D_g[1:,:]) * 0.5) * ds[:,None]
+        H = s_g[-1] - s_g[0]
+        if not (np.isfinite(H) and H != 0.0):
+            avg_g = D_g.mean(axis=0)
+        else:
+            avg_g = integ.sum(axis=0) / H
+    avg[sel,:] = avg_g[None,:]
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+avg_vtk = ns.numpy_to_vtk(avg.copy(), deep=1)
+avg_vtk.SetName("__ARRAY___avg___AXIS__")
+out.GetPointData().AddArray(avg_vtk)
+""".lstrip()
+    else:
+        # 'bins' mode (your original idea), now also Δs-weighted
+        PF_TEMPLATE = r"""
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+from vtkmodules.util import numpy_support as ns
+import numpy as np
+
+inp = self.GetInputDataObject(0,0)
+if inp is None:
+    raise RuntimeError("No input dataset.")
+
+wrap = dsa.WrapDataObject(inp)
+pts  = wrap.Points
+if pts is None or pts.shape[0] == 0:
+    raise RuntimeError("No points on input.")
+
+pd = wrap.PointData
+name = "__ARRAY__"
+if name not in pd.keys():
+    raise RuntimeError("Array '%s' not found in PointData." % name)
+
+# data as (N,C)
+data = np.asarray(pd[name])
+if data.ndim == 1:
+    data = data.reshape(-1,1)
+else:
+    data = data.reshape(data.shape[0], -1)
+
+A = __AXIS_INDEX__
+others = [i for i in (0,1,2) if i != A]
+u0 = np.asarray(pts[:, others[0]], dtype=float)
+u1 = np.asarray(pts[:, others[1]], dtype=float)
+s  = np.asarray(pts[:, A],           dtype=float)   # coordinate along averaging axis
+
+nb = int(__BINS__)
+u0min,u0max = float(np.nanmin(u0)), float(np.nanmax(u0))
+u1min,u1max = float(np.nanmin(u1)), float(np.nanmax(u1))
+if not np.isfinite(u0min) or not np.isfinite(u0max) or u0max <= u0min: u0max = u0min + 1e-9
+if not np.isfinite(u1min) or not np.isfinite(u1max) or u1max <= u1min: u1max = u1min + 1e-9
+
+i0 = np.floor((u0 - u0min) / (u0max - u0min) * nb).astype(np.int64)
+i1 = np.floor((u1 - u1min) / (u1max - u1min) * nb).astype(np.int64)
+i0 = np.clip(i0, 0, nb-1)
+i1 = np.clip(i1, 0, nb-1)
+
+keys = (i0 << 20) ^ i1
+uniq, inv = np.unique(keys, return_inverse=True)
+G = uniq.size; C = data.shape[1]
+
+# trapezoidal, Δs-weighted mean within each group
+avg = np.empty_like(data, dtype=float)
+for g in range(G):
+    sel = (inv == g)
+    if not np.any(sel):
+        continue
+    s_g = s[sel]
+    D_g = data[sel,:]
+    o = np.argsort(s_g)
+    s_g = s_g[o]; D_g = D_g[o,:]
+    if s_g.size == 1:
+        avg_g = D_g[0,:]
+    else:
+        ds = np.diff(s_g)
+        integ = ((D_g[:-1,:] + D_g[1:,:]) * 0.5) * ds[:,None]
+        H = s_g[-1] - s_g[0]
+        if not (np.isfinite(H) and H != 0.0):
+            avg_g = D_g.mean(axis=0)
+        else:
+            avg_g = integ.sum(axis=0) / H
+    avg[sel,:] = avg_g[None,:]
+
+out = self.GetOutputDataObject(0)
+out.ShallowCopy(inp)
+avg_vtk = ns.numpy_to_vtk(avg.copy(), deep=1)
+avg_vtk.SetName("__ARRAY___avg___AXIS__")
+out.GetPointData().AddArray(avg_vtk)
+""".lstrip()
+
+    pf_code = (
+        PF_TEMPLATE
+        .replace("__ARRAY__", array_name)
+        .replace("__AXIS_INDEX__", str(A))
+        .replace("__AXIS__", axis_letter.upper())
+        .replace("__BINS__", str(int(bins_perp)))
+    )
+
+    pf = ProgrammableFilter(Input=src_pts)
+    pf.Script = pf_code
+    pf.RequestInformationScript = ''
+    pf.RequestUpdateExtentScript = ''
+    pf.PythonPath = ''
+    pf.UpdatePipeline()
+
+    avg_name = f"{array_name}_avg_{axis_letter.upper()}"
+    return pf, avg_name
 
 
 def apply_spanwise_average(src, axis_letter='Y', array_name='U'):
