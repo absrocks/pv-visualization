@@ -26,7 +26,7 @@ INPUT_PARAMETERS = {
     'output_directory': './out',
     'number_range': None,
     'start_time': 9,        # None --> to start from 0
-    'end_time': 10,
+    'end_time': 9.2,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -257,8 +257,8 @@ def main():
                     array_name=eps_depth,          # e.g., "U_avg_Z"
                     slope_deg=30.0,
                     n_samples=1000,
-                    path=
-                    out_path="out/csv/eps_depth_Z_stream_t_{t}.csv",
+                    path="out/csv/",
+                    fname=f"eps_depth_Z_stream_t_{str(t)}.csv",
                     use_magnitude=False)
                 
             
@@ -346,7 +346,7 @@ def streamwise_profile_save(xz_slice,
                                 n_samples=1000,
                                 y0=None,
                                 z0=None,
-                                folder=None,
+                                path=None,
                                 fname=None,
                                 use_magnitude=False,
                                 component=None):
@@ -425,22 +425,24 @@ def streamwise_profile_save(xz_slice,
         calcM.UpdatePipeline()
         src_for_save = calcM
         target_col = calcM.ResultArrayName
-    os.makedirs(folder, exist_ok=True)
+    os.makedirs(os.path.join(path,target_col), exist_ok=True)
     # 5) Save exactly two columns: X and your chosen column
     try:
-        SaveData(os.path.join(folder, fname),
+        SaveData(os.path.join(path, fname),
                  proxy=src_for_save,
-                 ChooseArraysToWrite= 0,
+                 ChooseArraysToWrite= 1,
                  FieldAssociation='Point Data',
-                 PointDataArrays=['X', target_col],
+                 PointDataArrays=['X', target_col, 'alpha.water_avg_Y'],
                  CellDataArrays= [],
+                 RowDataArrays=[],
+                 FieldDataArrays=[],
                  UseScientificNotation=1,
                  Precision=16,
                  AddTime=0)
     except TypeError:
         # older ParaView: minimal args
-        SaveData(out_path, proxy=src_for_save)
-    print(f"[profile] wrote 2-column (X, {target_col}) to {out_path}")
+        SaveData(os.path.join(path, fname), proxy=src_for_save)
+    print(f"[profile] wrote 2-column (X, {target_col}) to {path}")
     return src_for_save
     
 def streamwise_profile_via_line(xz_slice,
