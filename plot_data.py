@@ -5,8 +5,8 @@ import csv, re
 from pathlib import Path
 
 INPUT_PARAMETERS = {
-    'base_directory': '/Users/abhishek/work/free_surface_2025/wave_tank/15_degree_slope/PostProcessing/csv',
-    'variable': 'epsilon_avg_Z'
+    'base_directory': '/Users/abhishek/work/free_surface_2025/wave_tank/15_degree_slope/PostProcessing/csv/epsilon_turb_avg_Z_new',
+    'variable': 'epsilon_turb_avg_Z'
 }
 
 cfg = dict(INPUT_PARAMETERS)
@@ -76,7 +76,7 @@ def epsilon_plot(path, cfg):
             eps_turb = np.array(cols["epsilon_avg_Z"])
         print("max eps_turb", max(eps_turb), "at t=", ti)
         eps_turb[np.where(alpha <=0.2)] = 'nan'
-        eps_turb[np.where(eps_turb >= 2)] = 'nan'
+        #eps_turb[np.where(eps_turb >= 7)] = 'nan'
         x = np.array(cols["X"])
         eps.append(eps_turb)
     if not eps:
@@ -90,19 +90,22 @@ def epsilon_plot(path, cfg):
     eps_index = np.where(eps_avg >= 1e-6)
     x = x[eps_index]
     eps_avg = eps_avg[eps_index]
+    xindex = np.where(x >= 7.2)
+    x = x[xindex]
+    eps_avg = eps_avg[xindex]
     
     # Plot
     if 'turb' in cfg.get("variable"):
-        plot_label = r'Time averaged Turbulent Dissipation ($\epsilon$)'
-        plot_ylabel = r'Turbulent Dissipation (${m}^3/{s}^3$)'
-        plot_title = 'Plot of Turbulent Dissipation with streamwise location'
+        plot_label = r'Time Averaged and depth averaged $\epsilon$ ($\epsilon$)'
+        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
+        plot_title = 'Spatial distribution of time averaged and depth averaged turbulence dissipation rate'
     elif 'eps' in cfg.get("variable"):
-        plot_label = r'Time Averaged Dissipation Rate ($\epsilon$)'
-        plot_ylabel = r'Dissipation Rate (${m}^3/{s}^3$)'
-        plot_title = 'Plot of dissipation rate with streamwise location'
+        plot_label = r'Time Averaged and depth averaged $\epsilon$'
+        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
+        plot_title = 'Spatial distribution of time averaged and depth averaged dissipation rate'
     
     plt.figure(figsize=(8, 5))
-    plt.plot(x, eps_avg, linestyle='-', label=plot_label)
+    plt.plot(x, eps_avg, linestyle='-')
     plt.xlabel('X (m)')
     plt.ylabel(plot_ylabel)
     plt.title(plot_title)

@@ -54,7 +54,7 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'turb_eps',
+        'out_array': 'calc_eps',
         'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
@@ -177,6 +177,10 @@ def main():
             src, avg_name = apply_spanwise_average(src, axis_letter=axis_letter, array_name=base)
             print(f"Calculated array: {avg_name}")
             prime_name = f"{base}_prime_{axis_letter}"
+            
+            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
+            src = apply_isovolume(src, cfg, array_name=alpha_avg)
+            
             src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
             print(f"Calculated array: {prime_name}")
             src, grad_name = apply_gradient(src, prime_name)
@@ -186,7 +190,7 @@ def main():
             
             effective_vis_array = eps_name
             print(f"[pvpython-child] Added array: {effective_vis_array}")
-            src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
+            
             
         if 'energy' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] Energy output will be written")
@@ -211,7 +215,7 @@ def main():
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
         
-        src = apply_isovolume(src, cfg, array_name=alpha_avg)
+        #src = apply_isovolume(src, cfg, array_name=alpha_avg)
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
@@ -231,8 +235,8 @@ def main():
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = out_flux(src, cfg, effective_vis_array)
         if 'streamwise' in cfg.get("visualization")["out_array"]:
-            src, in_eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
-            effective_vis_array = in_eps_depth
+            src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
+            effective_vis_array = eps_depth
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = apply_slices(src, "Y")
             pnames, cnames = list_point_cell_arrays(src)
@@ -258,7 +262,7 @@ def main():
                     slope_deg=30.0,
                     n_samples=1000,
                     path="out/csv/",
-                    fname=f"in_eps_depth_Z_stream_t_{str(t)}.csv",
+                    fname=f"{effective_vis_array}_stream_t_{str(t)}.csv",
                     use_magnitude=False)
                 
             
