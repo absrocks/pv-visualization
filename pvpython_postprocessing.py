@@ -25,7 +25,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 10,        # None --> to start from 0
+    'start_time': 6.8,        # None --> to start from 0
     'end_time': 14,
 
     # ---- Averaging Options ----
@@ -33,9 +33,9 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': True,      # set False to disable
+        'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 7.0,
+        'Xmin': 0.2,
         'Xmax': 10.0,
     },
     'slice': {
@@ -54,14 +54,14 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'calc_eps',
+        'out_array': 'streamwise_turb_eps',
         'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
         'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1e',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
-        'show_axis': True,
+        'show_axis': False,
     },
     
 }
@@ -157,7 +157,7 @@ def main():
             src, eps_name_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="EpsAvg")
             print(f"[pvpython-child] Calculated array: {eps_name_avg}")
             src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
-            effective_vis_array = [eps_name_in, eps_name_avg]
+            effective_vis_array = eps_name_avg
             
         if 'k' in cfg.get("visualization")["out_array"]:
             print(f"[pvpython-child] TKE output will be written")
@@ -215,7 +215,7 @@ def main():
             src, s2_name = strain_rate(src, array_name=grad_name, out_name="S2")
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
         
-        #src = apply_isovolume(src, cfg, array_name=alpha_avg)
+        src = apply_isovolume(src, cfg, array_name=alpha_avg)
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
@@ -235,35 +235,34 @@ def main():
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = out_flux(src, cfg, effective_vis_array)
         if 'streamwise' in cfg.get("visualization")["out_array"]:
-            src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
-            effective_vis_array = eps_depth
-            print(f"[pvpython-child] Added array: {effective_vis_array}")
+            #src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
+            #effective_vis_array = eps_depth
+            #print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = apply_slices(src, "Y")
-            pnames, cnames = list_point_cell_arrays(src)
-            print("pnames:", pnames)
-            print("cnames:", cnames)
             
-            tk = GetTimeKeeper()
-            times = list(getattr(tk, "TimestepValues", []) or [])
-            tmin = cfg.get("start_time", None)
-            tmax = cfg.get("end_time", None)
-            for t in times:
-                if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
-                    continue
-                GetAnimationScene().AnimationTime = t
-                try:
-                    src.UpdatePipeline(time=t)
-                except Exception:
-                    src.UpdatePipeline()
+            print(f"importing array: {effective_vis_array}")
+            streamwise_logs(src, cfg, effective_vis_array)
+            #tk = GetTimeKeeper()
+            ##times = list(getattr(tk, "TimestepValues", []) or [])
+            #tmin = cfg.get("start_time", None)
+            #tmax = cfg.get("end_time", None)
+            #for t in times:
+            #    if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
+            #        continue
+            #    GetAnimationScene().AnimationTime = t
+            #    try:
+            #        src.UpdatePipeline(time=t)
+            #    except Exception:
+            #        src.UpdatePipeline()
         
-                streamwise_profile_save(
-                    src,
-                    array_name=effective_vis_array,          # e.g., "U_avg_Z"
-                    slope_deg=30.0,
-                    n_samples=1000,
-                    path="out/csv/",
-                    fname=f"{effective_vis_array}_stream_t_{str(t)}.csv",
-                    use_magnitude=False)
+            #    streamwise_profile_save(
+            #        src,
+            #        array_name=effective_vis_array,          # e.g., "U_avg_Z"
+            #        slope_deg=30.0,
+            #        n_samples=1000,
+            #        path="out/csv/",
+            #        fname=f"{effective_vis_array}_stream_t_{str(t)}.csv",
+            #        use_magnitude=False)
                 
             
         else:
@@ -275,6 +274,61 @@ def main():
 
     print("[pvpython-child] Completed successfully.")
     return 0
+
+def streamwise_logs(src, cfg, effective_vis_array):
+    """
+    For each timestep in the source, compute spanwise-average of `base_array`,
+    then print bounds at that time. Returns the averaging filter so caller can reuse.
+    """
+    
+    # 0) Gather times
+    tk = GetTimeKeeper()
+    times = list(getattr(tk, "TimestepValues", []) or [])
+    if not times:
+        times = list(getattr(src, "TimestepValues", []) or [])
+    
+    # Optional window
+    tmin = cfg.get("start_time", None)
+    tmax = cfg.get("end_time", None)
+    print("tmin",tmin, "tmax",tmax)
+    
+    for t in times:
+        
+        if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
+            continue
+        GetAnimationScene().AnimationTime = t
+        try:
+            src.UpdatePipeline(time=t)
+        except Exception:
+            src.UpdatePipeline()
+        
+        out_dat = f"logs/{effective_vis_array}/{effective_vis_array}_{t}.dat"
+        # write header once
+        dat_init(out_dat, [effective_vis_array])
+        # Query bounds on the averaged output (geometry is unchanged by averaging)
+        (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
+        print(f"src bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
+        delx = 0.1
+        xx = np.arange(xmin+delx, xmax, delx)
+        if not np.isclose(xx[-1], np.round(xmax,2)):
+            xx = np.append(xx, np.round(xmax,2))
+        for ix in xx:
+            
+            src_x = apply_slices(src, "X", loc=ix)
+            (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src_x)
+            print(f"src_x bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
+            integ = integrate_variables(src_x)
+            dz = zmax - zmin
+            res, measure, missing = fetch_integrals(integ, [effective_vis_array], depth=dz, return_average=True)
+            if missing:
+                print(f"[warn] X={ix} t={t}: missing in integrator output: {missing}", flush=True)
+
+            dat_append(out_dat, np.round(ix,2), [effective_vis_array], res)
+        
+            print("Measure =", measure, " averages:",
+              " ".join(f"{k}={res.get(k,{}).get('average', float('nan')):.6g}" for k in [effective_vis_array]), " at X=", ix,
+              flush=True)
+        
     
 def src_update_with_time(src, cfg):
     
@@ -586,7 +640,8 @@ def calculate_magnitude(src, array_name):
     calc.Function        = f"mag({q})"
     calc.UpdatePipeline()
     return calc, calc.ResultArrayName
-    
+
+
 def energy(src, cfg, effective_vis_array):
     """
     For each timestep in the source, compute spanwise-average of `base_array`,
@@ -663,111 +718,164 @@ def integrate_variables(src):
     
     return integ
 
-def fetch_integrals(src, arrays, components=None, return_average=False):
+def fetch_integrals(src, arrays, depth=None, components=None, return_average=False):
     """
-    Read integrated values for `arrays` from an IntegrateVariables *proxy* `src`.
-    For multi-component arrays with no component specified, FIRST look for a
-    magnitude column in the integrator output:
-        '<name>_Magnitude', '<name>_input_1', '<name>_mag', '|<name>|', 'mag(<name>)'.
-    If none exists, auto-create it via `calculate_magnitude` (post-integrate) and use that.
+    Rules:
+    - components is None:
+        Expect scalar arrays only. If vector/tensor -> error asking to enable components.
+    - components is not None (True or dict):
+        Expect vector arrays. Default -> magnitude (find or create via calculate_magnitude, then refetch).
+        If dict has an int index for a name, use that component instead.
+    
+    # ---- normalize arrays input ----
+    if arrays is None:
+        raise ValueError("arrays cannot be None")
+    
+
+    if isinstance(arrays, str):
+        array_list = [arrays]
+    elif isinstance(arrays, (list, tuple)):
+        array_list = list(arrays)
+    else:
+        # If someone passes a numpy array / generator etc.
+        array_list = list(arrays)
+    
+    if any(isinstance(x, str) and len(x) == 1 for x in array_list) and isinstance(arrays, str):
+        raise RuntimeError("arrays was a string but got split into characters; check normalization.")
     """
-    dobj = sm.Fetch(src)
-    if dobj is None:
-        raise RuntimeError("IntegrateVariables: Fetch returned None.")
+    def _fetch_wrap(s):
+        dobj = sm.Fetch(s)
+        if dobj is None:
+            raise RuntimeError("IntegrateVariables: Fetch returned None.")
+        w = dsa.WrapDataObject(dobj)
+        return w, w.CellData, w.PointData
 
-    wrap = dsa.WrapDataObject(dobj)
-    cd   = wrap.CellData
-    pd   = wrap.PointData
-
-    # Geometric measure (Volume/Area/Length) from CellData if present
-    measure = float("nan")
+    wrap, cd, pd = _fetch_wrap(src)
+    #print("cd:", cd.keys(), "pd:", pd.keys())
+    # --- geometric measure (Volume/Area/Length) ---
+    
     for key in ("Volume", "Area", "Length"):
         if key in cd.keys():
             m = np.asarray(cd[key], dtype=float).ravel()
             if m.size:
-                measure = float(m[0]); break
-
-    results    = {}
-    missing    = []
-    components = components or {}
-
-    def _find_mag_column(base):
-        for nm in (f"{base}_Magnitude", f"{base}_input_1", f"{base}_mag", f"|{base}|", f"mag({base})"):
-            if nm in cd.keys():
-                arr = np.asarray(cd[nm], dtype=float)
-                return (arr[0] if arr.ndim == 2 and arr.shape[0] == 1 else arr), nm
-            if nm in pd.keys():
-                arr = np.asarray(pd[nm], dtype=float)
-                return (arr[0] if arr.ndim == 2 and arr.shape[0] == 1 else arr), nm
+                measure = float(m[0])
+                break
+    if 'measure' not in locals():
+        measure = depth
+    def _read_array(name, _cd, _pd):
+        if name in _cd.keys():
+            return np.asarray(_cd[name], dtype=float), "CellData"
+        if name in _pd.keys():
+            return np.asarray(_pd[name], dtype=float), "PointData"
         return None, None
 
+    def _as_scalar_if_singleton(vals):
+        a = np.asarray(vals, dtype=float)
+        if a.size == 1:
+            return float(a.ravel()[0])
+        return None  # not singleton
+
+    def _find_mag_column(base, _cd, _pd):
+        for nm in (f"{base}_Magnitude", f"{base}_input_1", f"{base}_mag", f"|{base}|", f"mag({base})"):
+            if nm in _cd.keys():
+                return nm, np.asarray(_cd[nm], dtype=float)
+            if nm in _pd.keys():
+                return nm, np.asarray(_pd[nm], dtype=float)
+        return None, None
+    def _normalize_integrator_output(raw):
+        a = np.asarray(raw, dtype=float)
+        # IntegrateVariables frequently returns (1, ncomp) for vectors/tensors
+        if a.ndim == 2 and a.shape[0] == 1:
+            a = a[0]
+        return a
+    def _add_average(entry):
+        if return_average and np.isfinite(measure) and measure != 0.0:
+            entry["average"] = entry["integral"] / measure
+
+    # components can be True (meaning magnitude for all) or dict {name: idx/"magnitude"}
+    comp_map = None
+    if components is None:
+        comp_map = None
+    elif components is True:
+        comp_map = {}
+    elif isinstance(components, dict):
+        comp_map = components
+    else:
+        raise TypeError("components must be None, True, or a dict like {'U': 'magnitude'} or {'U': 0}")
+
+    results = {}
+    missing = []
+
     for name in arrays:
-        # Pull from integrator output (prefer CellData)
-        if name in cd.keys():
-            raw = np.asarray(cd[name], dtype=float)
-        elif name in pd.keys():
-            raw = np.asarray(pd[name], dtype=float)
-        else:
+        raw, where = _read_array(name, cd, pd)
+        if raw is None:
             missing.append(name)
             continue
 
-        vals = raw[0] if (raw.ndim == 2 and raw.shape[0] == 1) else raw
-        comp_sel = components.get(name, None)
+        vals = _normalize_integrator_output(raw)
+        
+        # --- Case A: components is None => expect scalar only ---
+        if comp_map is None:
+            scalar = _as_scalar_if_singleton(vals)
+            if scalar is None:
+                raise RuntimeError(
+                    f"'{name}' is not scalar (got shape {vals.shape} from {where}). "
+                    f"Set components=True (or provide a components dict) to select magnitude/component."
+                )
+            val = scalar
+            entry = {"integral": val}
+            _add_average(entry)
+            
+            results[name] = entry
+            continue
 
-        if np.isscalar(vals):
-            val = float(vals)
+        # --- Case B: components enabled => expect vector ---
+        # (If scalar, we error per your requirement.)
+        if vals.ndim == 0:
+            raise RuntimeError(
+                f"'{name}' is scalar but components is enabled. "
+                f"This mode expects a vector so it can compute magnitude/component."
+            )
+        if vals.ndim != 1:
+            raise RuntimeError(f"'{name}' returned unsupported shape {vals.shape}.")
 
-        elif vals.ndim == 1:  # multi-component vector/tensor
-            if comp_sel is None:
-                alt, alt_nm = _find_mag_column(name)
-                if alt is None:
-                    # Create <name>_Magnitude on-the-fly (post-integrate), then re-fetch
-                    src, mag_nm = calculate_magnitude(src, name)
-                    dobj = sm.Fetch(src)
-                    if dobj is None:
-                        raise RuntimeError("IntegrateVariables (after mag creation): Fetch returned None.")
-                    wrap = dsa.WrapDataObject(dobj)
-                    cd, pd = wrap.CellData, wrap.PointData
-                    # Try again
-                    if mag_nm in cd.keys():
-                        alt = np.asarray(cd[mag_nm], dtype=float)
-                    elif mag_nm in pd.keys():
-                        alt = np.asarray(pd[mag_nm], dtype=float)
-                    else:
-                        raise RuntimeError(f"IntegrateVariables: failed to create '{mag_nm}'.")
-                val = float(np.asarray(alt).ravel()[0])
-            elif isinstance(comp_sel, str) and comp_sel.lower() == "magnitude":
-                alt, _ = _find_mag_column(name)
-                if alt is None:
-                    # Same as above: create then read
-                    src, _ = calculate_magnitude(src, name)
-                    dobj = sm.Fetch(src)
-                    if dobj is None:
-                        raise RuntimeError("IntegrateVariables (after mag creation): Fetch returned None.")
-                    wrap = dsa.WrapDataObject(dobj)
-                    cd, pd = wrap.CellData, wrap.PointData
-                    alt, _ = _find_mag_column(name)
-                    if alt is None:
-                        raise RuntimeError(
-                            f"IntegrateVariables: requested magnitude for '{name}', "
-                            f"but could not create/find magnitude column."
-                        )
-                val = float(np.asarray(alt).ravel()[0])
+        sel = comp_map.get(name, None)  # None => default magnitude
+
+        # component index selection
+        if sel is not None and not (isinstance(sel, str) and sel.lower() == "magnitude"):
+            idx = int(sel)
+            if idx < 0 or idx >= vals.shape[0]:
+                raise RuntimeError(f"components['{name}'] index {idx} out of range 0..{vals.shape[0]-1}")
+            val = float(vals[idx])
+            entry = {"integral": val}
+            _add_average(entry)
+            results[name] = entry
+            continue
+
+        # magnitude selection (default)
+        mag_nm, mag_raw = _find_mag_column(name, cd, pd)
+        if mag_raw is None:
+            # create magnitude column and refetch
+            src, mag_nm = calculate_magnitude(src, name)
+            wrap, cd, pd = _fetch_wrap(src)
+
+            # re-find/read magnitude column
+            if mag_nm in cd.keys():
+                mag_raw = np.asarray(cd[mag_nm], dtype=float)
+            elif mag_nm in pd.keys():
+                mag_raw = np.asarray(pd[mag_nm], dtype=float)
             else:
-                idx = int(comp_sel)
-                if idx < 0 or idx >= vals.shape[0]:
-                    raise RuntimeError(f"components['{name}'] index {idx} out of range 0..{vals.shape[0]-1}")
-                val = float(vals[idx])
+                raise RuntimeError(f"Failed to create/find magnitude column '{mag_nm}' for '{name}'.")
 
-        else:
-            raise RuntimeError(f"IntegrateVariables: '{name}' returned shape {vals.shape}, not supported.")
+        mag_vals = _normalize_integrator_output(mag_raw)
+        mag_scalar = float(np.asarray(mag_vals).ravel()[0])
 
-        entry = {'integral': val}
-        if return_average and np.isfinite(measure) and measure != 0.0:
-            entry['average'] = val / measure
+        entry = {"integral": mag_scalar}
+        _add_average(entry)
         results[name] = entry
 
     return results, measure, missing
+
 
 def eps_streamwise(src, array_name='U', assoc=None):
     """
@@ -1019,7 +1127,7 @@ def dat_init(path: str, arrays: list, suffix="_avg"):
     """
     _ensure_parent(path)
     with open(path, "w") as f:
-        cols = ["Time"] + [f"{name}{suffix}" for name in arrays]
+        cols = ["X (m)"] + [f"{name}{suffix}" for name in arrays]
         f.write("# " + " ".join(cols) + "\n")
 
 def dat_append(path: str, t: float, arrays: list, results: dict, suffix="_avg"):

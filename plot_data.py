@@ -3,20 +3,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv, re
 from pathlib import Path
+from scipy.ndimage import gaussian_filter1d
 
 INPUT_PARAMETERS = {
-    'base_directory': '/Users/abhishek/work/free_surface_2025/wave_tank/15_degree_slope/PostProcessing/csv/epsilon_turb_avg_Z_new',
-    'variable': 'epsilon_turb_avg_Z'
+    'base_directory': '/Users/abhishek/work/free_surface_2025/wave_tank/15_degree_slope/PostProcessing/logs',
+    'variable': 'epsilon_turb'
 }
 
 cfg = dict(INPUT_PARAMETERS)
 
-dir = os.path.join(cfg.get("base_directory"),cfg.get("variable"))
+dir = os.path.join(cfg.get("base_directory"), cfg.get("variable"))
 
 def main():
     epsilon_plot(dir, cfg)
 
-def load_cols(path):
+def csv_load_cols(path):
     with open(path, newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
         cols = {h: [] for h in r.fieldnames}
@@ -25,6 +26,40 @@ def load_cols(path):
                 cols[h].append(float(row[h]))
     return cols
 
+
+def load_cols(path):
+    # Load data, skipping comment lines
+    data = np.loadtxt(path, comments='#')
+    
+    # Read header from comment line
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('#'):
+                header_text = line[1:].strip()
+                break
+        else:
+            raise ValueError(f"No header found in {path}")
+    
+    # Remove anything in parentheses (units)
+    header_text = re.sub(r'\([^)]*\)', '', header_text)
+    
+    # Split by whitespace and remove empty strings
+    headers = [h for h in header_text.split() if h]
+    
+    # Ensure data is 2D
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    
+    # Verify column count matches
+    if len(headers) != data.shape[1]:
+        raise ValueError(f"Header has {len(headers)} columns {headers} but data has {data.shape[1]} columns in {path}")
+    
+    # Create dictionary
+    cols = {}
+    for i, h in enumerate(headers):
+        cols[h] = data[:, i].tolist()
+    
+    return cols
 def flux_plot():
     # Define the path and filename
     path = "/Users/abhishek/work/free_surface_2025/wang_kraus_scaled/elongated/data"
@@ -54,45 +89,71 @@ def flux_plot():
     plt.show()
 def epsilon_plot(path, cfg):
     folder = Path(path)
-    pat = re.compile(r"_t_([0-9.]+)\.csv$")
+    pat = re.compile(r"_([0-9.]+)\.dat$")
     
     pairs = []
-    for p in folder.glob("*_t_*.csv"):
+    for p in folder.glob("*.dat"):
+        
         m = pat.search(p.name)
         if m:
             pairs.append((float(m.group(1)), p))
-    
+        else:
+            print(f"Not matched: {p.name}")
     pairs.sort(key=lambda tp: tp[0])  # sort by time
     
+    if not pairs:
+        raise FileNotFoundError("No matching .dat files found.")
+        
+    # Determine which variable to extract
+    if 'turb' in cfg.get("variable"):
+        var_name = "epsilon_turb_avg"
+    elif 'eps' in cfg.get("variable"):
+        var_name = "epsilon_avg_Z"
+    else:
+        raise ValueError("Variable type not recognized in config")
+        
+    # Collect all data with X positions
     t = []
-    eps = []
+    data_dict = {}  # dict of {x_position: [eps_values_at_different_times]}
+    
     for ti, p in pairs:
         t.append(ti)
         cols = load_cols(p)
-        alpha = np.array(cols["alpha.water_avg_Y"])
-        if 'turb' in cfg.get("variable"):
-            eps_turb = np.array(cols["epsilon_turb_avg_Z"])
-        elif 'eps' in cfg.get("variable"):
-            eps_turb = np.array(cols["epsilon_avg_Z"])
-        print("max eps_turb", max(eps_turb), "at t=", ti)
-        eps_turb[np.where(alpha <=0.2)] = 'nan'
-        #eps_turb[np.where(eps_turb >= 7)] = 'nan'
+        #print("cols", cols)
+        eps_turb = np.array(cols[var_name])
         x = np.array(cols["X"])
-        eps.append(eps_turb)
-    if not eps:
-        raise FileNotFoundError("No matching x_t_*.csv files found.")
+        
+        print(f"max {var_name}", max(eps_turb), "at t=", ti)
+        
+        # Store epsilon values by X position
+        for x_pos, eps_val in zip(x, eps_turb):
+            if x_pos not in data_dict:
+                data_dict[x_pos] = []
+            data_dict[x_pos].append(eps_val)
     
+    # Convert to sorted arrays
+    x_positions = sorted(data_dict.keys())
+    x_array = np.array(x_positions)
+    #print("x_array:", x_array)
+    # Calculate average for each X position
+    eps_avg = []
+    for x_pos in x_positions:
+        
+        values = np.array(data_dict[x_pos])
+        # Use nanmean to handle any NaN values
+        avg_val = np.nanmean(values)
+        #print("At x_pos", x_pos, "array:", values, "Avg:", avg_val)
+        eps_avg.append(avg_val)
     
-    n = len(eps[0])
-    if any(len(x) != n for x in eps):
-        raise ValueError("Not all X columns have the same length across files.")
-    eps_avg = np.nanmean(np.array(eps, dtype=float), axis=0)
-    eps_index = np.where(eps_avg >= 1e-6)
-    x = x[eps_index]
+    eps_avg = np.array(eps_avg)
+    
+    eps_index = np.where(eps_avg >= 10**-9)
+    x_array = x_array[eps_index]
     eps_avg = eps_avg[eps_index]
-    xindex = np.where(x >= 7.2)
-    x = x[xindex]
-    eps_avg = eps_avg[xindex]
+    mask = np.where((x_array < 4) & (eps_avg >= 10**-4))
+    #print(mask)
+    x_array = np.delete(x_array, mask)
+    eps_avg = np.delete(eps_avg, mask)
     
     # Plot
     if 'turb' in cfg.get("variable"):
@@ -105,7 +166,8 @@ def epsilon_plot(path, cfg):
         plot_title = 'Spatial distribution of time averaged and depth averaged dissipation rate'
     
     plt.figure(figsize=(8, 5))
-    plt.plot(x, eps_avg, linestyle='-')
+    plt.plot(x_array, eps_avg, linestyle='-')
+    plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2.0), linestyle='-')
     plt.xlabel('X (m)')
     plt.ylabel(plot_ylabel)
     plt.title(plot_title)
