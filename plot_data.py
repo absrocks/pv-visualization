@@ -14,6 +14,10 @@ cfg = dict(INPUT_PARAMETERS)
 
 dir = os.path.join(cfg.get("base_directory"), cfg.get("variable"))
 
+# Define Plots
+
+plt.figure(figsize=(8, 5))
+
 def main():
     epsilon_plot(dir, cfg)
 
@@ -26,7 +30,56 @@ def csv_load_cols(path):
                 cols[h].append(float(row[h]))
     return cols
 
-
+def time_avg(pairs, var_name, window=None):
+    
+    if window is not None:
+        tmin, tmax = window[0], window[1]
+    else:
+        tmin, tmax = pairs[0][0], pairs[-1][0]
+    # Collect all data with X positions
+    data_dict = {}  # dict of {x_position: [eps_values_at_different_times]}
+    
+    for ti, p in pairs:
+        
+        if ti >= tmin and ti <= tmax:
+            cols = load_cols(p)
+            
+            eps_turb = np.array(cols[var_name])
+            x = np.array(cols["X"])
+            
+            print(f"max {var_name}", max(eps_turb), "at t=", ti)
+            
+            # Store epsilon values by X position
+            for x_pos, eps_val in zip(x, eps_turb):
+                if x_pos not in data_dict:
+                    data_dict[x_pos] = []
+                data_dict[x_pos].append(eps_val)
+    
+    # Convert to sorted arrays
+    x_positions = sorted(data_dict.keys())
+    x_array = np.array(x_positions)
+    
+    # Calculate average for each X position
+    eps_avg = []
+    for x_pos in x_positions:
+        values = np.array(data_dict[x_pos])
+        # Use nanmean to handle any NaN values
+        avg_val = np.nanmean(values)
+        
+        eps_avg.append(avg_val)
+    
+    eps_avg = np.array(eps_avg)
+    
+    return eps_avg, x_array
+    
+def cleanup(eps,x):
+    eps_index = np.where(eps >= 10 ** -9)
+    x_array = x[eps_index]
+    eps_avg = eps[eps_index]
+    mask = np.where((x_array < 4) & (eps_avg >= 10**-4))
+    x_array = np.delete(x_array, mask)
+    eps_avg = np.delete(eps_avg, mask)
+    return eps_avg, x_array, mask
 def load_cols(path):
     # Load data, skipping comment lines
     data = np.loadtxt(path, comments='#')
@@ -111,50 +164,13 @@ def epsilon_plot(path, cfg):
         var_name = "epsilon_avg_Z"
     else:
         raise ValueError("Variable type not recognized in config")
-        
-    # Collect all data with X positions
-    t = []
-    data_dict = {}  # dict of {x_position: [eps_values_at_different_times]}
-    
-    for ti, p in pairs:
-        t.append(ti)
-        cols = load_cols(p)
-        #print("cols", cols)
-        eps_turb = np.array(cols[var_name])
-        x = np.array(cols["X"])
-        
-        print(f"max {var_name}", max(eps_turb), "at t=", ti)
-        
-        # Store epsilon values by X position
-        for x_pos, eps_val in zip(x, eps_turb):
-            if x_pos not in data_dict:
-                data_dict[x_pos] = []
-            data_dict[x_pos].append(eps_val)
-    
-    # Convert to sorted arrays
-    x_positions = sorted(data_dict.keys())
-    x_array = np.array(x_positions)
-    #print("x_array:", x_array)
-    # Calculate average for each X position
-    eps_avg = []
-    for x_pos in x_positions:
-        
-        values = np.array(data_dict[x_pos])
-        # Use nanmean to handle any NaN values
-        avg_val = np.nanmean(values)
-        #print("At x_pos", x_pos, "array:", values, "Avg:", avg_val)
-        eps_avg.append(avg_val)
-    
-    eps_avg = np.array(eps_avg)
-    
-    eps_index = np.where(eps_avg >= 10**-9)
-    x_array = x_array[eps_index]
-    eps_avg = eps_avg[eps_index]
-    mask = np.where((x_array < 4) & (eps_avg >= 10**-4))
-    #print(mask)
-    x_array = np.delete(x_array, mask)
-    eps_avg = np.delete(eps_avg, mask)
-    
+    t_list = [6.8, 8, 10, 12, 14]
+    for i in range(len(t_list)):
+        if i > 0:
+            eps_avg, x_array = time_avg(pairs, var_name, window=[t_list[0], t_list[i]])
+            eps_avg, x_array, mask = cleanup(eps_avg, x_array)
+            plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2), linestyle='-',
+                     label=f'Time Average Window-t={t_list[0]}s-{t_list[i]}s')
     # Plot
     if 'turb' in cfg.get("variable"):
         plot_label = r'Time Averaged and depth averaged $\epsilon$ ($\epsilon$)'
@@ -165,9 +181,8 @@ def epsilon_plot(path, cfg):
         plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
         plot_title = 'Spatial distribution of time averaged and depth averaged dissipation rate'
     
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_array, eps_avg, linestyle='-')
-    plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2.0), linestyle='-')
+    plt.vlines(6.8, min(eps_avg), max(eps_avg), color='black')
+    plt.text(5.5, 1e-4, r'$X_{c}=6.8$ m', color='black')
     plt.xlabel('X (m)')
     plt.ylabel(plot_ylabel)
     plt.title(plot_title)
