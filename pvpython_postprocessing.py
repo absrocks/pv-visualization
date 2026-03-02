@@ -2218,7 +2218,12 @@ t1 = _robust_tolerance(x1)
 k0 = np.round(x0 / t0).astype(np.int64)
 k1 = np.round(x1 / t1).astype(np.int64)
 
-keys = (k0.astype(np.int64) << 21) ^ (k1.astype(np.int64) & ((1<<21)-1))
+k0 -= k0.min()
+k1 -= k1.min()
+
+n1 = k1.max() + 1
+keys = k0 * n1 + k1
+
 uniq_keys, inv = np.unique(keys, return_inverse=True)
 
 # Vectorized group-wise mean using bincount
