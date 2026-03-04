@@ -25,8 +25,8 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 6.8,        # None --> to start from 0
-    'end_time': 14,
+    'start_time': 44,        # None --> to start from 0
+    'end_time': 45,
 
     # ---- Averaging Options ----
     'averaging': {
@@ -54,14 +54,19 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'streamwise_turb_eps',
-        'range': [1e-5, 1],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.1e',             # '6.1e' | '6.2f'
+        'out_array': 'velocity',
+        'range': [0, 0.5],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [0.1, 0.2, 0.3, 0.4, 0.5], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.1f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
-        'show_axis': False,
+        'x_label_gap': 2,                   # gap between X-axis labels (uses src bounds)
+        'z_label_gap': 0.4,                 # gap between Z-axis labels (uses src bounds)
+        'x_scale': 0.5,                     # geometry scale factor for X (1.0 = no scaling)
+        'y_scale': 1.0,                     # geometry scale factor for Y
+        'z_scale': 2.0,                     # geometry scale factor for Z
+        'show_axis': True,
     },
     
 }
@@ -128,11 +133,11 @@ def main():
     
     
     if cfg.get("visualization")["show_axis"] is True:
-        src1 = vis_slice_axis(src, axis_letter)
+        src1 = vis_slice_axis(src, axis_letter, cfg=cfg)
         print("Visualization axis is set")
         
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
-    
+    print(f"[pvpython-child] Domain bounds: {xmin}, {xmax}, {ymin}, {ymax}, {zmin}, {zmax}")
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
     
@@ -266,7 +271,7 @@ def main():
                 
             
         else:
-            color_by_array_and_save_pngs(src, cfg, zmin, zmax, desired_array=effective_vis_array)
+            color_by_array_and_save_pngs(src, cfg, xmin, xmax, zmin, zmax, desired_array=effective_vis_array)
         
     except Exception as e:
         print(f"[pvpython-child][ERROR] Visualization failed: {e}", file=sys.stderr)
@@ -1372,33 +1377,33 @@ def _domain_bounds(src):
         raise RuntimeError("Cannot get dataset bounds for clipping.")
     return b  # (xmin,xmax, ymin,ymax, zmin,zmax)
 
-def vis_slice_axis(src, axis_letter, loc=None):
+def vis_slice_axis(src, axis_letter, loc=None, cfg=None):
 
     # create a new 'Extract Surface'
     cur = MergeBlocks(Input=src)
     #src.UpdatePipeline()
     (xmin,xmax,ymin,ymax,zmin,zmax) = _domain_bounds(src)
     pos   = [(xmax-xmin)/2, (ymax-ymin)/2, (zmax-zmin)/2]
-    
+
     # Apply Slice
     slice1 = Slice(registrationName='Slice1', Input=cur)
     slice1.SliceType = 'Plane'
     slice1.HyperTreeGridSlicer = 'Plane'
-    
+
     if axis_letter == 'Y':
         # init the 'Plane' selected for 'SliceType'
         if loc is not None:
             pos[1] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [0.0, 1.0, 0.0]
-     
+
     if axis_letter == 'X':
         # init the 'Plane' selected for 'SliceType'
         if loc is not None:
             pos[0] = loc
         slice1.SliceType.Origin = pos
         slice1.SliceType.Normal = [1.0, 0.0, 0.0]
-    
+
     if axis_letter == 'Z':
         # init the 'Plane' selected for 'SliceType'
         if loc is not None:
@@ -1407,7 +1412,24 @@ def vis_slice_axis(src, axis_letter, loc=None):
         slice1.SliceType.Normal = [0.0, 0.0, 1.0]
     
     slice1.UpdatePipeline()
-    sliceShow = Show(slice1)
+
+    vis = (cfg or {}).get("visualization", {})
+    x_sc = float(vis.get("x_scale", 1.0))
+    y_sc = float(vis.get("y_scale", 1.0))
+    z_sc = float(vis.get("z_scale", 1.0))
+    needs_scale = (x_sc != 1.0 or y_sc != 1.0 or z_sc != 1.0)
+
+    def _maybe_scale(proxy):
+        if not needs_scale:
+            return proxy
+        t = Transform(Input=proxy)
+        t.Transform = 'Transform'
+        t.Transform.Scale = [x_sc, y_sc, z_sc]
+        t.UpdatePipeline()
+        return t
+
+    outline_src = _maybe_scale(slice1)
+    sliceShow = Show(outline_src)
     sliceShow.Representation = 'Outline'
     
     extractSurface1 = ExtractSurface(registrationName='ExtractSurface1', Input=slice1)
@@ -1418,7 +1440,8 @@ def vis_slice_axis(src, axis_letter, loc=None):
     redistributeDataSet1.GenerateGlobalCellIds = 1
     
     redistributeDataSet1.UpdatePipeline()
-    DataShow = Show(redistributeDataSet1)
+    edges_src = _maybe_scale(redistributeDataSet1)
+    DataShow = Show(edges_src)
     DataShow.Representation = 'Feature Edges'
     
     # create a new 'Annotate Time Filter'
@@ -1501,7 +1524,7 @@ def apply_clipping(src, axis, xmin=None, xmax=None, ymin=None, ymax=None, zmin=N
     print(f"[pvpython-child] Applied Box clip on {axis} from {amin} to {amax}")
     return clip1
 
-def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
+def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_factor=1.5):
     """
     Orient camera to show a principal plane.
     'XZ' -> look along +Y, Z is up (XZ plane visible)
@@ -1510,6 +1533,8 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     """
     info = src.GetDataInformation()
     b = info.GetBounds()  # (xmin,xmax, ymin,ymax, zmin,zmax)
+    print(f"[pvpython-child] Bounds: {b}")
+    
     if not b:
         return
     cx = 0.5 * (b[0] + b[1])
@@ -1520,11 +1545,21 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
     rz = (b[5] - b[4])
     R = dist_factor * _bi.max(rx, ry, rz, 1e-6)
     
-    xx0 = cfg.get("clipping")["Xmin"]
-    xx1 = cfg.get("clipping")["Xmax"]
-    xlim = np.arange(xx0, xx1+1)
-    zlim = np.linspace(zmin, zmax, 3)
-    
+    vis = cfg.get("visualization", {})
+    x_gap = vis.get("x_label_gap", 1)
+    z_gap = vis.get("z_label_gap", 0.1)
+    x_sc  = float(vis.get("x_scale", 1.0))
+    y_sc  = float(vis.get("y_scale", 1.0))
+    z_sc  = float(vis.get("z_scale", 1.0))
+    needs_scale = (x_sc != 1.0 or y_sc != 1.0 or z_sc != 1.0)
+
+    xlim = np.arange(xmin, xmax+x_gap, x_gap)
+    print(f"[pvpython-child] Z-axis max: {zmax}")
+    print(f"[pvpython-child] Z-axis min: {zmin}")
+
+    zlim = np.arange(abs(np.round(zmin, 2)), np.round(zmax, 2)+z_gap, z_gap)
+    print(f"[pvpython-child] Z-axis labels: {zlim}")
+
     # For view axes:
     view.AxesGrid.XTitle = 'X (m)'
     view.AxesGrid.YTitle = 'Y (m)'
@@ -1554,13 +1589,19 @@ def set_camera_plane(view, src, cfg, zmin, zmax, plane="XZ", dist_factor=1.5):
             # Set Axis
             view.AxesGrid.Visibility = 1
             view.AxesGrid.AxesToLabel = 5
-            
-            # For data axes:
             view.AxesGrid.XAxisUseCustomLabels = 1
-            view.AxesGrid.XAxisLabels = xlim.tolist()
-            
             view.AxesGrid.ZAxisUseCustomLabels = 1
-            view.AxesGrid.ZAxisLabels = [np.round(zmin,1), np.round((zmax -zmin)/2,1) , np.round(zmax,2)]
+            if needs_scale:
+                
+                view.AxesGrid.DataScale = [x_sc, y_sc, z_sc]
+                view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
+                view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
+                
+            else:
+                
+                view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
+                view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
+
             view.AxesGrid.XTitleFontSize = 30
             view.AxesGrid.XLabelFontSize = 27
             view.AxesGrid.ZTitleFontSize = 30
@@ -2549,13 +2590,14 @@ def calculate_k(src, prime_vec_name, axis_letter='Y', result_name='k'):
     # Done
     return calc_k, result_name
 
-def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=None, *more_arrays):
+def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax=None, desired_array=None, *more_arrays):
     """
     Render 1 or many arrays.
     - Single array: behaves like before, saves into output_directory.
     - Multiple arrays: creates subfolders per array and saves there.
     zmin/zmax are accepted for future use (e.g., camera/clipping); ignored if None.
     """
+    print(f"[pvpython-color_by] Z-axis max: {zmax}")
     vis = cfg.get("visualization", {}) or {}
     img_size = vis.get("image_size") or [1200, 800]
     # ensure ints
@@ -2599,6 +2641,17 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
         view.Background = bg
     view.ViewSize = [w, h]
 
+    # Apply geometry scaling if any scale factor differs from 1
+    x_sc = float(vis.get("x_scale", 1.0))
+    y_sc = float(vis.get("y_scale", 1.0))
+    z_sc = float(vis.get("z_scale", 1.0))
+    if x_sc != 1.0 or y_sc != 1.0 or z_sc != 1.0:
+        transform = Transform(Input=src)
+        transform.Transform = 'Transform'
+        transform.Transform.Scale = [x_sc, y_sc, z_sc]
+        transform.UpdatePipeline()
+        src = transform
+
     # common helper: resolve & render a single array to a specific folder
     def _render_one(target_array, folder):
         # resolve suffixes like 'U_avg'/'U_prime' → add axis if needed
@@ -2628,7 +2681,7 @@ def color_by_array_and_save_pngs(src, cfg, zmin=None, zmax=None, desired_array=N
 
         # optional: orient camera (XZ by default)
         try:
-            set_camera_plane(view, src, cfg, zmin, zmax, plane=cam_plane)
+            set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane=cam_plane)
         except Exception:
             RuntimeError(f"Cannot set the camera")
 
