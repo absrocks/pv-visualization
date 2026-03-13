@@ -15,6 +15,7 @@ import logging
 import tempfile
 import shlex
 from pathlib import Path
+import math
 
 # -------------------------------
 # Configuration
@@ -25,7 +26,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 44,        # None --> to start from 0
+    'start_time': 25,        # None --> to start from 0
     'end_time': 45,
 
     # ---- Averaging Options ----
@@ -33,10 +34,10 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': False,      # set False to disable
+        'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 0.2,
-        'Xmax': 10.0,
+        'Xmin': 32,
+        'Xmax': 48,
     },
     'slice': {
         'enabled': True,      # set False to disable
@@ -45,8 +46,8 @@ INPUT_PARAMETERS = {
     'openfoam': {
         'mode': 'decomposed',                                        # 'reconstructed' | 'decomposed' | 'auto'
         'mesh_regions': ['internalMesh'],                            # or [] / None
-        'cell_arrays':  ['U', 'alpha.water'],         # or [] / None , 'UAvg', 'nut
-        'point_arrays': ['U', 'alpha.water'],         # e.g., ['T']
+        'cell_arrays':  ['U', 'alpha.water', 'nut', 'k'],         # or [] / None , 'UAvg', 'nut
+        'point_arrays': ['U', 'alpha.water', 'nut', 'k'],         # e.g., ['T']
     },
 
     # ---- Visualization options ----
@@ -54,10 +55,10 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'velocity',
-        'range': [0, 0.5],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [0.1, 0.2, 0.3, 0.4, 0.5], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.1f',             # '6.1e' | '6.2f'
+        'out_array': 'k',
+        'range': [0, 0.05],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [0, 0.01, 0.02, 0.03, 0.04, 0.05], #[0.1, 0.2, 0.3, 0.4, 0.5], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.2f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
@@ -134,6 +135,7 @@ def main():
     
     if cfg.get("visualization")["show_axis"] is True:
         src1 = vis_slice_axis(src, axis_letter, cfg=cfg)
+        vis_slice_boundary(src1, cfg=cfg)
         print("Visualization axis is set")
         
     (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
@@ -172,8 +174,10 @@ def main():
             prime_name = f"{base}_prime_{axis_letter}"
             src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
             print(f"Calculated array: {prime_name}")
-            src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="TKE")
-            effective_vis_array = k_name
+            src, k_name = calculate_k(src, prime_vec_name=prime_name, axis_letter=axis_letter, result_name="k_resolved")
+            src, k_sgs = apply_spanwise_average(src, axis_letter=axis_letter, array_name="k")
+            src, k_total = add_arrays(src, array_a=k_name, array_b=k_sgs, result_name="TKE")
+            effective_vis_array = k_total
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
         
@@ -184,7 +188,6 @@ def main():
             prime_name = f"{base}_prime_{axis_letter}"
             
             src, alpha_avg = apply_spanwise_average(src, axis_letter=axis_letter, array_name="alpha.water")
-            src = apply_isovolume(src, cfg, array_name=alpha_avg)
             
             src = add_fluctuation(src, base_array=base, avg_array=avg_name, out_name=prime_name)
             print(f"Calculated array: {prime_name}")
@@ -1366,6 +1369,121 @@ def pick_reader(fname, cfg):
     if low.endswith(".vtm"):
         return XMLMultiBlockDataReader(FileName=[fname])
         
+_BOUNDARY_PF_SCRIPT = """
+import vtk
+import numpy as np
+from collections import defaultdict
+
+def _flatten(dataset):
+    if dataset is None:
+        return None
+    if dataset.IsA('vtkPolyData'):
+        return dataset
+    if dataset.IsA('vtkCompositeDataSet'):
+        app = vtk.vtkAppendPolyData()
+        it = dataset.NewIterator()
+        it.InitTraversal()
+        found = False
+        while not it.IsDoneWithTraversal():
+            blk = it.GetCurrentDataObject()
+            if blk is not None and blk.IsA('vtkPolyData'):
+                app.AddInputData(blk)
+                found = True
+            it.GoToNextItem()
+        if not found:
+            return None
+        app.Update()
+        return app.GetOutput()
+    return None
+
+def _edge_pairs(poly):
+    lines = poly.GetLines()
+    idl   = vtk.vtkIdList()
+    edges = []
+    lines.InitTraversal()
+    while lines.GetNextCell(idl):
+        n = idl.GetNumberOfIds()
+        for k in range(n - 1):
+            edges.append((idl.GetId(k), idl.GetId(k + 1)))
+    return edges
+
+def _ordered_loops(edge_pairs):
+    adj = {}
+    for a, b in edge_pairs:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    visited = set()
+    loops   = []
+    for start in list(adj.keys()):
+        if start in visited:
+            continue
+        loop    = [start]
+        visited.add(start)
+        cur     = start
+        while True:
+            moved = False
+            for nb in adj[cur]:
+                if nb not in visited:
+                    loop.append(nb)
+                    visited.add(nb)
+                    cur   = nb
+                    moved = True
+                    break
+            if not moved:
+                break
+        if len(loop) > 2 and start in adj[cur]:
+            loop.append(start)
+        if len(loop) > 2:
+            loops.append(loop)
+    return loops
+
+inp  = self.GetInputDataObject(0, 0)
+out  = self.GetOutputDataObject(0)
+poly = _flatten(inp)
+
+if poly is None or poly.GetNumberOfPoints() == 0:
+    out.Initialize()
+else:
+    cleaner = vtk.vtkCleanPolyData()
+    cleaner.SetInputData(poly)
+    cleaner.SetTolerance(1e-8)
+    cleaner.Update()
+    poly = cleaner.GetOutput()
+
+    fe = vtk.vtkFeatureEdges()
+    fe.SetInputData(poly)
+    fe.BoundaryEdgesOn()
+    fe.FeatureEdgesOff()
+    fe.NonManifoldEdgesOff()
+    fe.ManifoldEdgesOff()
+    fe.Update()
+    fe_out = fe.GetOutput()
+
+    if fe_out is None or fe_out.GetNumberOfPoints() == 0:
+        out.Initialize()
+    else:
+        n      = fe_out.GetNumberOfPoints()
+        pts    = np.array([fe_out.GetPoint(i) for i in range(n)])
+        loops  = _ordered_loops(_edge_pairs(fe_out))
+
+        new_pts   = vtk.vtkPoints()
+        new_lines = vtk.vtkCellArray()
+        counter   = 0
+        for loop in loops:
+            lp  = pts[loop]
+            pl  = vtk.vtkPolyLine()
+            pl.GetPointIds().SetNumberOfIds(len(lp))
+            for j, pt in enumerate(lp):
+                new_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+                pl.GetPointIds().SetId(j, counter)
+                counter += 1
+            new_lines.InsertNextCell(pl)
+
+        out.SetPoints(new_pts)
+        out.SetLines(new_lines)
+""".strip()
+
+
 def _axis_index(axis_letter):
     return {'X': 0, 'Y': 1, 'Z': 2}[axis_letter.upper()]
 
@@ -1441,8 +1559,8 @@ def vis_slice_axis(src, axis_letter, loc=None, cfg=None):
     
     redistributeDataSet1.UpdatePipeline()
     edges_src = _maybe_scale(redistributeDataSet1)
-    DataShow = Show(edges_src)
-    DataShow.Representation = 'Feature Edges'
+    #DataShow = Show(edges_src)
+    #DataShow.Representation = 'Feature Edges'
     
     # create a new 'Annotate Time Filter'
     annotateTimeFilter1 = AnnotateTimeFilter(registrationName='AnnotateTimeFilter1', Input=redistributeDataSet1)
@@ -1464,8 +1582,141 @@ def vis_slice_axis(src, axis_letter, loc=None, cfg=None):
             raise RuntimeError("Couldn't set the Time Filter Option")
             
     
-    return src
-    
+    return outline_src
+
+
+def vis_slice_boundary(src, cfg=None):
+    """
+    Extract the boundary outline of a 2D slice (src) and display it
+    as one PolyLineSource per closed loop with Wireframe representation.
+
+    Uses sm.Fetch to gather data client-side for correct cross-partition
+    boundary detection.
+
+    Parameters
+    ----------
+    src  : ParaView source that is already a 2D slice
+    cfg  : config dict (reads x_scale / y_scale / z_scale)
+    """
+    import vtk as _vtk
+
+    raw = sm.Fetch(src)
+    if raw is None:
+        print("[pvpython-child] Warning: vis_slice_boundary got None from Fetch.")
+        return
+
+    def _to_polydata(ds):
+        if ds.IsA('vtkPolyData'):
+            return ds
+        if ds.IsA('vtkCompositeDataSet'):
+            app = _vtk.vtkAppendPolyData()
+            it = ds.NewIterator()
+            it.InitTraversal()
+            found = False
+            while not it.IsDoneWithTraversal():
+                blk = it.GetCurrentDataObject()
+                if blk is not None:
+                    sub = _to_polydata(blk)
+                    if sub and sub.GetNumberOfPoints() > 0:
+                        app.AddInputData(sub)
+                        found = True
+                it.GoToNextItem()
+            if not found:
+                return None
+            app.Update()
+            return app.GetOutput()
+        geo = _vtk.vtkGeometryFilter()
+        geo.SetInputData(ds)
+        geo.Update()
+        return geo.GetOutput()
+
+    poly = _to_polydata(raw)
+    if poly is None or poly.GetNumberOfPoints() == 0:
+        print("[pvpython-child] Warning: vis_slice_boundary found no points.")
+        return
+
+    cleaner = _vtk.vtkCleanPolyData()
+    cleaner.SetInputData(poly)
+    cleaner.SetTolerance(1e-6)
+    cleaner.Update()
+    poly = cleaner.GetOutput()
+
+    fe = _vtk.vtkFeatureEdges()
+    fe.SetInputData(poly)
+    fe.BoundaryEdgesOn()
+    fe.FeatureEdgesOff()
+    fe.NonManifoldEdgesOff()
+    fe.ManifoldEdgesOff()
+    fe.Update()
+    fe_out = fe.GetOutput()
+
+    n_fe = fe_out.GetNumberOfPoints() if fe_out else 0
+    if n_fe == 0:
+        print("[pvpython-child] Warning: vis_slice_boundary found no boundary edges.")
+        return
+
+    def _edge_pairs(pd):
+        lines = pd.GetLines()
+        idl = _vtk.vtkIdList()
+        edges = []
+        lines.InitTraversal()
+        while lines.GetNextCell(idl):
+            n = idl.GetNumberOfIds()
+            for k in range(n - 1):
+                edges.append((idl.GetId(k), idl.GetId(k + 1)))
+        return edges
+
+    def _ordered_loops(edge_pairs):
+        adj = {}
+        for a, b in edge_pairs:
+            adj.setdefault(a, []).append(b)
+            adj.setdefault(b, []).append(a)
+        visited = set()
+        loops = []
+        for start in list(adj.keys()):
+            if start in visited:
+                continue
+            loop = [start]
+            visited.add(start)
+            cur = start
+            while True:
+                moved = False
+                for nb in adj[cur]:
+                    if nb not in visited:
+                        loop.append(nb)
+                        visited.add(nb)
+                        cur = nb
+                        moved = True
+                        break
+                if not moved:
+                    break
+            if len(loop) > 2 and start in adj[cur]:
+                loop.append(start)
+            if len(loop) > 2:
+                loops.append(loop)
+        return loops
+
+    pts_arr = np.array([fe_out.GetPoint(i) for i in range(n_fe)])
+    loops = _ordered_loops(_edge_pairs(fe_out))
+
+    for loop_idx, indices in enumerate(loops):
+        loop_pts = pts_arr[indices]
+        flat_pts = loop_pts.ravel().tolist()
+
+        pls = PolyLineSource(registrationName=f'BoundaryLoop{loop_idx}')
+        pls.Points = flat_pts
+        pls.UpdatePipeline()
+
+        pls_disp                = Show(pls)
+        pls_disp.Representation = 'Wireframe'
+        pls_disp.LineWidth      = 2.0
+        pls_disp.AmbientColor   = [0.0, 0.0, 0.0]
+        pls_disp.DiffuseColor   = [0.0, 0.0, 0.0]
+
+    print(f"[pvpython-child] Boundary outline: {len(loops)} loop(s), "
+          f"{n_fe} points total")
+
+
 def apply_clipping(src, axis, xmin=None, xmax=None, ymin=None, ymax=None, zmin=None, zmax=None):
     """
     If cfg['clipping'] is enabled, apply a Box clip:
@@ -1525,6 +1776,7 @@ def apply_clipping(src, axis, xmin=None, xmax=None, ymin=None, ymax=None, zmin=N
     return clip1
 
 def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_factor=1.5):
+    import math
     """
     Orient camera to show a principal plane.
     'XZ' -> look along +Y, Z is up (XZ plane visible)
@@ -1533,7 +1785,6 @@ def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_fa
     """
     info = src.GetDataInformation()
     b = info.GetBounds()  # (xmin,xmax, ymin,ymax, zmin,zmax)
-    print(f"[pvpython-child] Bounds: {b}")
     
     if not b:
         return
@@ -1552,13 +1803,12 @@ def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_fa
     y_sc  = float(vis.get("y_scale", 1.0))
     z_sc  = float(vis.get("z_scale", 1.0))
     needs_scale = (x_sc != 1.0 or y_sc != 1.0 or z_sc != 1.0)
-
-    xlim = np.arange(xmin, xmax+x_gap, x_gap)
-    print(f"[pvpython-child] Z-axis max: {zmax}")
-    print(f"[pvpython-child] Z-axis min: {zmin}")
-
-    zlim = np.arange(abs(np.round(zmin, 2)), np.round(zmax, 2)+z_gap, z_gap)
-    print(f"[pvpython-child] Z-axis labels: {zlim}")
+    
+    print("xmin1:", xmin, "xmax1:", xmax, "xgap1:", x_gap)
+    xlim = np.arange(math.floor(abs(np.round(xmin,2))), np.round(xmax, 2) + x_gap, x_gap)
+    print("xmin2:", xmin, "xmax2:", xmax, "xlim:", xlim)
+    zlim = np.arange(abs(np.round(zmin, 2)), np.round(zmax, 2) + z_gap, z_gap)
+    print("xlim:", xlim)
 
     # For view axes:
     view.AxesGrid.XTitle = 'X (m)'
@@ -1592,7 +1842,6 @@ def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_fa
             view.AxesGrid.XAxisUseCustomLabels = 1
             view.AxesGrid.ZAxisUseCustomLabels = 1
             if needs_scale:
-                
                 view.AxesGrid.DataScale = [x_sc, y_sc, z_sc]
                 view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
                 view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
@@ -2590,6 +2839,25 @@ def calculate_k(src, prime_vec_name, axis_letter='Y', result_name='k'):
     # Done
     return calc_k, result_name
 
+def add_arrays(src, array_a, array_b, result_name='TKE'):
+    """
+    Add two scalar arrays element-wise:  result = array_a + array_b.
+    Returns: (src_with_sum, result_name)
+    """
+    pnames, cnames = list_point_cell_arrays(src)
+    for name in (array_a, array_b):
+        if name not in pnames and name not in cnames:
+            raise RuntimeError(
+                f"add_arrays: '{name}' not found. "
+                f"Point arrays: {pnames}; Cell arrays: {cnames}"
+            )
+
+    calc = Calculator(Input=src)
+    calc.ResultArrayName = result_name
+    calc.Function = f"{array_a}+{array_b}"
+    calc.UpdatePipeline()
+    return calc, result_name
+
 def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax=None, desired_array=None, *more_arrays):
     """
     Render 1 or many arrays.
@@ -2597,7 +2865,7 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
     - Multiple arrays: creates subfolders per array and saves there.
     zmin/zmax are accepted for future use (e.g., camera/clipping); ignored if None.
     """
-    print(f"[pvpython-color_by] Z-axis max: {zmax}")
+    
     vis = cfg.get("visualization", {}) or {}
     img_size = vis.get("image_size") or [1200, 800]
     # ensure ints
@@ -2639,6 +2907,8 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
     view = GetActiveViewOrCreate('RenderView')
     if bg and isinstance(bg, (list, tuple)) and len(bg) == 3:
         view.Background = bg
+        view.Background2 = bg
+        view.UseGradientBackground = 0
     view.ViewSize = [w, h]
 
     # Apply geometry scaling if any scale factor differs from 1
