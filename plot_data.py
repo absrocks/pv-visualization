@@ -1,34 +1,50 @@
+#!/usr/bin/env python3
+
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import csv, re
+import re
 from pathlib import Path
 from scipy.ndimage import gaussian_filter1d
 
 INPUT_PARAMETERS = {
-    'base_directory': '/Users/abhishek/work/free_surface_2025/wave_tank/15_degree_slope/PostProcessing/logs',
-    'variable': 'epsilon_turb'
+    'base_directory': [
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/logs',
+    ],
+    'variable': 'epsilon_turb', # or 'TKE', or 'epsilon_turb'
+    't_start': 30,
+    't_end': 40,
+    'window': False,
+    'window_periods': [25, 28, 32, 36, 40],
 }
 
 cfg = dict(INPUT_PARAMETERS)
 
-dir = os.path.join(cfg.get("base_directory"), cfg.get("variable"))
-
-# Define Plots
-
-plt.figure(figsize=(8, 5))
-
 def main():
-    epsilon_plot(dir, cfg)
-
-def csv_load_cols(path):
-    with open(path, newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        cols = {h: [] for h in r.fieldnames}
-        for row in r:
-            for h in cols:
-                cols[h].append(float(row[h]))
-    return cols
+    plt.figure(figsize=(8, 5))
+    dirs = cfg['base_directory']
+    if isinstance(dirs, str):
+        dirs = [dirs]
+    for base_dir in dirs:
+        data_dir = os.path.join(base_dir, cfg["variable"])
+        epsilon_plot(data_dir, cfg, base_dir)
+    # Plot formatting
+    if 'TKE' in cfg["variable"]:
+        plot_ylabel = r'k (${m}^2/{s}^2$)'
+        plot_title = 'Spatial distribution of time averaged and depth averaged turbulent kinetic energy'
+    elif 'eps' in cfg["variable"]:
+        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
+        plot_title = 'Spatial distribution of time averaged and depth averaged turbulent dissipation rate'
+    plt.xlabel('X (m)')
+    plt.ylabel(plot_ylabel)
+    plt.title(plot_title)
+    if 'eps' in cfg["variable"]:
+        plt.yscale("log")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 def time_avg(pairs, var_name, window=None):
     
@@ -126,7 +142,7 @@ def flux_plot():
 
     # Extract columns
     t = data[:, 0]  # 1st column
-    eflux = data[:, 1]  # 4th column
+    eflux = data[:, 1]  # 2nd column
     
     
     # Plot
@@ -135,12 +151,12 @@ def flux_plot():
     plt.plot(t, eflux, marker='o', linestyle='-', label='Energy Flux at x=25m')
     plt.xlabel('Time (s)')
     plt.ylabel(r'Total Energy Flux (${m}^3/{s}^3$)')
-    plt.title('Plot of Total FLux with TIme')
+    plt.title('Plot of Total Flux with Time')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-def epsilon_plot(path, cfg):
+def epsilon_plot(path, cfg, base_dir):
     folder = Path(path)
     pat = re.compile(r"_([0-9.]+)\.dat$")
     
@@ -158,38 +174,34 @@ def epsilon_plot(path, cfg):
         raise FileNotFoundError("No matching .dat files found.")
         
     # Determine which variable to extract
-    if 'turb' in cfg.get("variable"):
+    if 'TKE' in cfg["variable"]:
+        var_name = "TKE_avg"
+    elif 'eps' in cfg["variable"]:
         var_name = "epsilon_turb_avg"
-    elif 'eps' in cfg.get("variable"):
-        var_name = "epsilon_avg_Z"
     else:
         raise ValueError("Variable type not recognized in config")
-    t_list = [6.8, 8, 10, 12, 14]
-    for i in range(len(t_list)):
-        if i > 0:
+    all_eps = []
+    if cfg.get('window'):
+        t_list = cfg['window_periods']
+        for i in range(1, len(t_list)):
             eps_avg, x_array = time_avg(pairs, var_name, window=[t_list[0], t_list[i]])
             eps_avg, x_array, mask = cleanup(eps_avg, x_array)
+            if len(eps_avg) > 0:
+                plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2), linestyle='-',
+                         label=f'Time Average Window-t={t_list[0]}s-{t_list[i]}s')
+                all_eps.extend(eps_avg)
+    else:
+        t_start = cfg['t_start']
+        t_end = cfg['t_end']
+        eps_avg, x_array = time_avg(pairs, var_name, window=[t_start, t_end])
+        eps_avg, x_array, mask = cleanup(eps_avg, x_array)
+        #plt.plot(x_array, eps_avg, linestyle='-',
+        #             label=f'Time Average t={t_start}s-{t_end}s')
+        if len(eps_avg) > 0:
+            case_name = Path(base_dir).parent.name
             plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2), linestyle='-',
-                     label=f'Time Average Window-t={t_list[0]}s-{t_list[i]}s')
-    # Plot
-    if 'turb' in cfg.get("variable"):
-        plot_label = r'Time Averaged and depth averaged $\epsilon$ ($\epsilon$)'
-        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
-        plot_title = 'Spatial distribution of time averaged and depth averaged turbulence dissipation rate'
-    elif 'eps' in cfg.get("variable"):
-        plot_label = r'Time Averaged and depth averaged $\epsilon$'
-        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
-        plot_title = 'Spatial distribution of time averaged and depth averaged dissipation rate'
-    
-    plt.vlines(6.8, min(eps_avg), max(eps_avg), color='black')
-    plt.text(5.5, 1e-4, r'$X_{c}=6.8$ m', color='black')
-    plt.xlabel('X (m)')
-    plt.ylabel(plot_ylabel)
-    plt.title(plot_title)
-    plt.yscale("log")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-    
-main()
+                     label=case_name)
+            all_eps.extend(eps_avg)
+
+if __name__ == "__main__":
+    main()
