@@ -26,7 +26,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 25,        # None --> to start from 0
+    'start_time': 3.5,        # None --> to start from 0
     'end_time': 45,
 
     # ---- Averaging Options ----
@@ -34,7 +34,7 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': True,      # set False to disable
+        'enabled': False,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
         'Xmin': 32,
         'Xmax': 48,
@@ -55,15 +55,15 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'k',
-        'range': [0, 0.05],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [0, 0.01, 0.02, 0.03, 0.04, 0.05], #[0.1, 0.2, 0.3, 0.4, 0.5], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
-        'label_format': '6.2f',             # '6.1e' | '6.2f'
+        'out_array': 'vel_avg',
+        'range': [0, 1.6],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [0.4, 0.8, 1.2, 1.6], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'label_format': '6.1f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
         'x_label_gap': 2,                   # gap between X-axis labels (uses src bounds)
-        'z_label_gap': 0.4,                 # gap between Z-axis labels (uses src bounds)
+        'z_label_gap': 0.2,                 # gap between Z-axis labels (uses src bounds)
         'x_scale': 0.5,                     # geometry scale factor for X (1.0 = no scaling)
         'y_scale': 1.0,                     # geometry scale factor for Y
         'z_scale': 2.0,                     # geometry scale factor for Z
@@ -81,14 +81,14 @@ PROCESSING_OPTIONS = {
 MPI = {
     "enabled": True,                                                          # set False to run serial
     "launcher": "mpiexec",                                                    # "mpiexec" | "srun" | etc.
-    "n": int(os.environ.get("SLURM_NTASKS", "64")),                           # number of ranks
+    "n": int(os.environ.get("SLURM_NTASKS", "64")),                            # number of ranks
     "extra_args": []                                                          # e.g. ["--bind-to","core"]
 }
 # -------------------------------
 # Child pvpython script (string)
 # -------------------------------
 SCRIPT_CONTENT = r'''
-import sys, os, json, argparse, re
+import sys, os, json, argparse, re, gc
 from paraview.simple import *
 from paraview import servermanager as sm
 from vtkmodules.numpy_interface import dataset_adapter as dsa
@@ -142,7 +142,7 @@ def main():
     print(f"[pvpython-child] Domain bounds: {xmin}, {xmax}, {ymin}, {ymax}, {zmin}, {zmax}")
     # FLATTEN first, so everything downstream sees real vtkDataArrays:
     src = flatten_dataset(src)
-    
+
     try:
         base = vis_array
         if 'vel' in cfg.get("visualization")["out_array"]:
@@ -224,11 +224,11 @@ def main():
             src, eps_name = calculate_epsilon(src, s2_name, axis_letter=axis_letter, result_name='epsilon')
         
         src = apply_isovolume(src, cfg, array_name=alpha_avg)
-        
+
     except Exception as e:
         print(f"[pvpython-child][ERROR] Averaging/fluctuation step failed: {e}", file=sys.stderr)
         return 6
-    
+
     # ---- Render & save ----
     try:
         if 'energy' in cfg.get("visualization")["out_array"]:
@@ -1591,64 +1591,93 @@ def vis_slice_boundary(src, cfg=None):
     as one PolyLineSource per closed loop with Wireframe representation.
 
     Uses sm.Fetch to gather data client-side for correct cross-partition
-    boundary detection.
+    boundary detection.  The extracted boundary edges are cached to a .vtp
+    file (next to the output directory) so subsequent runs for the same
+    geometry skip the expensive serial extraction.
 
     Parameters
     ----------
     src  : ParaView source that is already a 2D slice
-    cfg  : config dict (reads x_scale / y_scale / z_scale)
+    cfg  : config dict (reads x_scale / y_scale / z_scale, output_directory)
     """
     import vtk as _vtk
 
-    raw = sm.Fetch(src)
-    if raw is None:
-        print("[pvpython-child] Warning: vis_slice_boundary got None from Fetch.")
-        return
+    # --- Determine cache path ---
+    outdir = (cfg or {}).get("output_directory", ".")
+    cache_path = os.path.join(outdir, "boundary_cache.vtp")
 
-    def _to_polydata(ds):
-        if ds.IsA('vtkPolyData'):
-            return ds
-        if ds.IsA('vtkCompositeDataSet'):
-            app = _vtk.vtkAppendPolyData()
-            it = ds.NewIterator()
-            it.InitTraversal()
-            found = False
-            while not it.IsDoneWithTraversal():
-                blk = it.GetCurrentDataObject()
-                if blk is not None:
-                    sub = _to_polydata(blk)
-                    if sub and sub.GetNumberOfPoints() > 0:
-                        app.AddInputData(sub)
-                        found = True
-                it.GoToNextItem()
-            if not found:
-                return None
-            app.Update()
-            return app.GetOutput()
-        geo = _vtk.vtkGeometryFilter()
-        geo.SetInputData(ds)
-        geo.Update()
-        return geo.GetOutput()
+    # --- Try loading from cache ---
+    fe_out = None
+    if os.path.isfile(cache_path):
+        print(f"[pvpython-child] Loading cached boundary from {cache_path}")
+        reader = _vtk.vtkXMLPolyDataReader()
+        reader.SetFileName(cache_path)
+        reader.Update()
+        fe_out = reader.GetOutput()
+        if fe_out is None or fe_out.GetNumberOfPoints() == 0:
+            print("[pvpython-child] Cache file empty/corrupt, recomputing boundary.")
+            fe_out = None
 
-    poly = _to_polydata(raw)
-    if poly is None or poly.GetNumberOfPoints() == 0:
-        print("[pvpython-child] Warning: vis_slice_boundary found no points.")
-        return
+    # --- Compute from scratch if no cache ---
+    if fe_out is None:
+        raw = sm.Fetch(src)
+        if raw is None:
+            print("[pvpython-child] Warning: vis_slice_boundary got None from Fetch.")
+            return
 
-    cleaner = _vtk.vtkCleanPolyData()
-    cleaner.SetInputData(poly)
-    cleaner.SetTolerance(1e-6)
-    cleaner.Update()
-    poly = cleaner.GetOutput()
+        def _to_polydata(ds):
+            if ds.IsA('vtkPolyData'):
+                return ds
+            if ds.IsA('vtkCompositeDataSet'):
+                app = _vtk.vtkAppendPolyData()
+                it = ds.NewIterator()
+                it.InitTraversal()
+                found = False
+                while not it.IsDoneWithTraversal():
+                    blk = it.GetCurrentDataObject()
+                    if blk is not None:
+                        sub = _to_polydata(blk)
+                        if sub and sub.GetNumberOfPoints() > 0:
+                            app.AddInputData(sub)
+                            found = True
+                    it.GoToNextItem()
+                if not found:
+                    return None
+                app.Update()
+                return app.GetOutput()
+            geo = _vtk.vtkGeometryFilter()
+            geo.SetInputData(ds)
+            geo.Update()
+            return geo.GetOutput()
 
-    fe = _vtk.vtkFeatureEdges()
-    fe.SetInputData(poly)
-    fe.BoundaryEdgesOn()
-    fe.FeatureEdgesOff()
-    fe.NonManifoldEdgesOff()
-    fe.ManifoldEdgesOff()
-    fe.Update()
-    fe_out = fe.GetOutput()
+        poly = _to_polydata(raw)
+        if poly is None or poly.GetNumberOfPoints() == 0:
+            print("[pvpython-child] Warning: vis_slice_boundary found no points.")
+            return
+
+        cleaner = _vtk.vtkCleanPolyData()
+        cleaner.SetInputData(poly)
+        cleaner.SetTolerance(1e-6)
+        cleaner.Update()
+        poly = cleaner.GetOutput()
+
+        fe = _vtk.vtkFeatureEdges()
+        fe.SetInputData(poly)
+        fe.BoundaryEdgesOn()
+        fe.FeatureEdgesOff()
+        fe.NonManifoldEdgesOff()
+        fe.ManifoldEdgesOff()
+        fe.Update()
+        fe_out = fe.GetOutput()
+
+        # Save to cache for future runs
+        if fe_out and fe_out.GetNumberOfPoints() > 0:
+            os.makedirs(outdir, exist_ok=True)
+            writer = _vtk.vtkXMLPolyDataWriter()
+            writer.SetFileName(cache_path)
+            writer.SetInputData(fe_out)
+            writer.Write()
+            print(f"[pvpython-child] Saved boundary cache to {cache_path}")
 
     n_fe = fe_out.GetNumberOfPoints() if fe_out else 0
     if n_fe == 0:
@@ -1804,11 +1833,19 @@ def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_fa
     z_sc  = float(vis.get("z_scale", 1.0))
     needs_scale = (x_sc != 1.0 or y_sc != 1.0 or z_sc != 1.0)
     
-    print("xmin1:", xmin, "xmax1:", xmax, "xgap1:", x_gap)
-    xlim = np.arange(math.floor(abs(np.round(xmin,2))), np.round(xmax, 2) + x_gap, x_gap)
-    print("xmin2:", xmin, "xmax2:", xmax, "xlim:", xlim)
-    zlim = np.arange(abs(np.round(zmin, 2)), np.round(zmax, 2) + z_gap, z_gap)
-    print("xlim:", xlim)
+    xmax_r = np.round(xmax, 2)
+    zmax_r = np.round(zmax, 2)
+    xmin_start = 0.0 if abs(xmin) < 1e-6 else math.floor(abs(np.round(xmin, 2)))
+    zmin_start = 0.0 if abs(zmin) < 1e-6 else abs(np.round(zmin, 2))
+    xlim = np.arange(xmin_start, xmax_r + x_gap, x_gap)
+    xlim = xlim[xlim <= xmax_r + 1e-9]
+    zlim = np.arange(zmin_start, zmax_r + z_gap, z_gap)
+    zlim = zlim[zlim <= zmax_r + 1e-9]
+    #print(f"[before] xlim: {xlim.tolist()}, zlim: {zlim.tolist()}")
+    # ParaView 6.x bug: exact 0.0 in custom axis labels renders as garbage.
+    # Replace with tiny epsilon; Fixed notation formats it as "0.0".
+    #xlim = np.where(np.abs(xlim) < 1e-10, 1e-100, xlim)
+    #zlim = np.where(np.abs(zlim) < 1e-10, 1e-100, zlim)
 
     # For view axes:
     view.AxesGrid.XTitle = 'X (m)'
@@ -1841,15 +1878,18 @@ def set_camera_plane(view, src, cfg, xmin, xmax, zmin, zmax, plane="XZ", dist_fa
             view.AxesGrid.AxesToLabel = 5
             view.AxesGrid.XAxisUseCustomLabels = 1
             view.AxesGrid.ZAxisUseCustomLabels = 1
+            try:
+                view.AxesGrid.XAxisNotation = 'Fixed'
+                view.AxesGrid.XAxisPrecision = 1
+                view.AxesGrid.ZAxisNotation = 'Fixed'
+                view.AxesGrid.ZAxisPrecision = 1
+            except Exception:
+                pass
             if needs_scale:
                 view.AxesGrid.DataScale = [x_sc, y_sc, z_sc]
-                view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
-                view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
-                
-            else:
-                
-                view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
-                view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
+            print(f"[pvpython-child] xlim: {xlim.tolist()}, zlim: {zlim.tolist()}")
+            view.AxesGrid.XAxisLabels = np.round(xlim, 6).tolist()
+            view.AxesGrid.ZAxisLabels = np.round(zlim, 6).tolist()
 
             view.AxesGrid.XTitleFontSize = 30
             view.AxesGrid.XLabelFontSize = 27
@@ -2878,7 +2918,7 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
     cmap     = vis.get("color_map")
     rng      = vis.get("range")         # None or [min, max]
     show_bar = bool(vis.get("show_scalar_bar", False))
-    bg       = vis.get("background", None)
+    bg       = vis.get("background") or [1, 1, 1]
     cam_plane = vis.get("camera_plane")
     out_array = vis.get("out_array")
     
@@ -2905,10 +2945,23 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
 
     # One render-view reused across arrays for speed
     view = GetActiveViewOrCreate('RenderView')
-    if bg and isinstance(bg, (list, tuple)) and len(bg) == 3:
-        view.Background = bg
-        view.Background2 = bg
+    # Force white background via palette (SaveScreenshot overrides view.Background)
+    try:
+        LoadPalette(paletteName='WhiteBackground')
+    except Exception:
+        pass
+    bg_float = [float(c) for c in bg] if bg and isinstance(bg, (list, tuple)) and len(bg) == 3 else [1.0, 1.0, 1.0]
+    view.Background = bg_float
+    view.Background2 = bg_float
+    try:
+        view.BackgroundColorMode = 'Single Color'
+    except Exception:
+        pass
+    try:
         view.UseGradientBackground = 0
+    except Exception:
+        pass
+    print(f"[pvpython-child] Background set to {bg_float}")
     view.ViewSize = [w, h]
 
     # Apply geometry scaling if any scale factor differs from 1
@@ -2976,6 +3029,30 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
             pwf = GetOpacityTransferFunction(arr)
             pwf.RescaleTransferFunction(r0, r1)
 
+        # Walk the entire pipeline chain and tell every filter to release
+        # its output data after downstream consumption.  Without this, each
+        # filter caches its full output across timesteps → OOM.
+        def _set_release_data_on_pipeline(proxy):
+            """Recursively set ReleaseDataFlag on proxy and all its inputs."""
+            if proxy is None:
+                return
+            try:
+                algo = proxy.GetClientSideObject()
+                if hasattr(algo, 'SetReleaseDataFlag'):
+                    algo.SetReleaseDataFlag(1)
+            except Exception:
+                pass
+            # Walk upstream inputs
+            try:
+                for i in range(proxy.GetNumberOfInputs()):
+                    inp = proxy.GetInput(i)
+                    if inp is not None:
+                        _set_release_data_on_pipeline(inp)
+            except Exception:
+                pass
+        _set_release_data_on_pipeline(src)
+        print("[pvpython-child] Set ReleaseDataFlag on full pipeline chain")
+
         # time handling
         tk = GetTimeKeeper()
         times = list(getattr(tk, "TimestepValues", []) or [])
@@ -2986,19 +3063,15 @@ def color_by_array_and_save_pngs(src, cfg, xmin=None, xmax=None, zmin=None, zmax
         end_time = cfg.get("end_time")
         if times:
             for t in times:
-                if (start_time is not None and end_time is not None):
-                    if (start_time <= t <= end_time):
-                        GetAnimationScene().AnimationTime = t
-                        view.Update()
-                        fname = f"{arr}_t_{_safe_time_str(t)}.png"
-                        SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
-                        print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
-                else:
-                    GetAnimationScene().AnimationTime = t
-                    view.Update()
-                    fname = f"{arr}_t_{_safe_time_str(t)}.png"
-                    SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
-                    print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+                if (start_time is not None and end_time is not None) and not (start_time <= t <= end_time):
+                    continue
+                GetAnimationScene().AnimationTime = t
+                view.Update()
+                fname = f"{arr}_t_{_safe_time_str(t)}.png"
+                SaveScreenshot(os.path.join(folder, fname), view, ImageResolution=img_res)
+                print(f"[pvpython-child] Saved {os.path.join(folder, fname)}")
+                # Force garbage collection to prevent OOM with many timesteps
+                gc.collect()
         else:
             view.Update()
             fname = f"{arr}_t_static.png"
@@ -3061,6 +3134,8 @@ def run_pvpython_child(script_text: str, files: list, cfg_obj: dict) -> int:
     # Ensure unbuffered Python in the child
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    env.pop('DISPLAY', None)              # suppress "bad X server connection" warnings in pvbatch
+    env['MESA_GL_VERSION_OVERRIDE'] = '3.3'  # ensure offscreen mesa context
     
     try:
         try:

@@ -157,6 +157,64 @@ def parse_blockmesh_xmax(blockmesh_path):
 
 
 # ─────────────────────────────────────────────
+#  Peak raising with smooth blending
+# ─────────────────────────────────────────────
+
+def raise_peak_smooth(pts, dz=0.1, n_blend=50):
+    """
+    Raise the peak (max-Z point) by dz and smoothly *scale* the triangle
+    sides so the shape is preserved — just taller.
+
+    For each side (left / right of peak):
+      - The base_z is the Z value at the n_blend-th neighbour (unchanged).
+      - Every point between base and peak is vertically scaled so that
+        the peak reaches (peak_z + dz) while the base stays fixed.
+    """
+    pts = pts.copy()
+    peak_idx = int(np.argmax(pts[:, 1]))
+    peak_x = pts[peak_idx, 0]
+    peak_z = pts[peak_idx, 1]
+
+    # Split into left-of-peak and right-of-peak by X coordinate
+    left_mask = pts[:, 0] < peak_x - 1e-12
+    right_mask = pts[:, 0] > peak_x + 1e-12
+
+    # Left side: sort by X descending (closest to peak first)
+    left_indices = np.where(left_mask)[0]
+    left_sorted = left_indices[np.argsort(-pts[left_indices, 0])]
+    left_blend = left_sorted[:n_blend]
+
+    # Right side: sort by X ascending (closest to peak first)
+    right_indices = np.where(right_mask)[0]
+    right_sorted = right_indices[np.argsort(pts[right_indices, 0])]
+    right_blend = right_sorted[:n_blend]
+
+    def _scale_side(indices):
+        if len(indices) == 0:
+            return
+        # base_z = Z at the outermost blend point (stays unchanged)
+        base_z = pts[indices[-1], 1]
+        h_peak = peak_z - base_z
+        if h_peak < 1e-12:
+            return
+        # scale factor to stretch from base_z to (peak_z + dz)
+        scale = (peak_z + dz - base_z) / h_peak
+        for idx in indices:
+            h = pts[idx, 1] - base_z
+            pts[idx, 1] = base_z + h * scale
+
+    _scale_side(left_blend)
+    _scale_side(right_blend)
+
+    # Raise the peak itself
+    pts[peak_idx, 1] = peak_z + dz
+
+    print(f"  Raised peak at index {peak_idx} (X={peak_x:.3f}) by {dz}, "
+          f"scaled {len(left_blend)} left + {len(right_blend)} right neighbours")
+    return pts
+
+
+# ─────────────────────────────────────────────
 #  Extra-point insertion
 # ─────────────────────────────────────────────
 
@@ -171,6 +229,10 @@ def append_blockmesh_boundary_point(pts, x_bm_max):
     """
     x_csv_max = np.max(pts[:, 0])
     x_csv_min = np.min(pts[:, 0])
+    z_csv_max = np.max(pts[:, 1])
+    pts = raise_peak_smooth(pts, dz=0.1, n_blend=100)
+    z_csv_max = np.max(pts[:, 1])
+    print(f" CSV Z range: {np.min(pts[:, 1])} to {z_csv_max}")
     # All points at the CSV x_max (tolerance for floats)
     tol = 1e-10 * (abs(x_csv_max) + 1.0)
     mask = np.abs(pts[:, 0] - x_csv_max) < tol
