@@ -26,7 +26,7 @@ INPUT_PARAMETERS = {
     'file_template': '*.foam',
     'output_directory': './out',
     'number_range': None,
-    'start_time': 3.5,        # None --> to start from 0
+    'start_time': 16,        # None --> to start from 0
     'end_time': 45,
 
     # ---- Averaging Options ----
@@ -34,9 +34,9 @@ INPUT_PARAMETERS = {
         'axis': 'Y',        # 'X' | 'Y' | 'Z'
     },
     'clipping': {
-        'enabled': False,      # set False to disable
+        'enabled': True,      # set False to disable
         'axis': 'X',          # 'X' | 'Y' | 'Z'
-        'Xmin': 32,
+        'Xmin': 18,
         'Xmax': 48,
     },
     'slice': {
@@ -55,19 +55,20 @@ INPUT_PARAMETERS = {
         'image_size': [1800, 1200],          # [width, height]
         'color_map': 'Jet',                 # colormap preset name
         'array': 'U',                    # REQUIRED: array to visualize
-        'out_array': 'vel_avg',
-        'range': [0, 1.6],                  # e.g., [0.0, 5.0]; None = auto
-        'custom_label': [0.4, 0.8, 1.2, 1.6], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
+        'out_array': 'vel',
+        'range': [0, 1.2],                  # e.g., [0.0, 5.0]; None = auto
+        'custom_label': [0, 0.4, 0.8, 1.2], #[1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],               # [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1],  # e.g. None
         'label_format': '6.1f',             # '6.1e' | '6.2f'
         'show_scalar_bar': True,            # show scalar bar
         'background': [1, 1, 1],            # white background
         'camera_plane': 'XZ',               # NEW: 'XZ' | 'XY' | 'YZ'
         'x_label_gap': 2,                   # gap between X-axis labels (uses src bounds)
         'z_label_gap': 0.2,                 # gap between Z-axis labels (uses src bounds)
-        'x_scale': 0.5,                     # geometry scale factor for X (1.0 = no scaling)
+        'x_scale': 1,                     # geometry scale factor for X (1.0 = no scaling)
         'y_scale': 1.0,                     # geometry scale factor for Y
-        'z_scale': 2.0,                     # geometry scale factor for Z
+        'z_scale': 1.0,                     # geometry scale factor for Z
         'show_axis': True,
+        'delx': 0.05,
     },
     
 }
@@ -243,35 +244,11 @@ def main():
             print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = out_flux(src, cfg, effective_vis_array)
         if 'streamwise' in cfg.get("visualization")["out_array"]:
-            #src, eps_depth = apply_directional_average(src, axis_letter="Z", array_name=effective_vis_array, mode='bins')
-            #effective_vis_array = eps_depth
             #print(f"[pvpython-child] Added array: {effective_vis_array}")
             src = apply_slices(src, "Y")
             
             print(f"importing array: {effective_vis_array}")
             streamwise_logs(src, cfg, effective_vis_array)
-            #tk = GetTimeKeeper()
-            ##times = list(getattr(tk, "TimestepValues", []) or [])
-            #tmin = cfg.get("start_time", None)
-            #tmax = cfg.get("end_time", None)
-            #for t in times:
-            #    if (tmin is not None and t < tmin) or (tmax is not None and t > tmax):
-            #        continue
-            #    GetAnimationScene().AnimationTime = t
-            #    try:
-            #        src.UpdatePipeline(time=t)
-            #    except Exception:
-            #        src.UpdatePipeline()
-        
-            #    streamwise_profile_save(
-            #        src,
-            #        array_name=effective_vis_array,          # e.g., "U_avg_Z"
-            #        slope_deg=30.0,
-            #        n_samples=1000,
-            #        path="out/csv/",
-            #        fname=f"{effective_vis_array}_stream_t_{str(t)}.csv",
-            #        use_magnitude=False)
-                
             
         else:
             color_by_array_and_save_pngs(src, cfg, xmin, xmax, zmin, zmax, desired_array=effective_vis_array)
@@ -315,8 +292,9 @@ def streamwise_logs(src, cfg, effective_vis_array):
         dat_init(out_dat, [effective_vis_array])
         # Query bounds on the averaged output (geometry is unchanged by averaging)
         (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src)
-        print(f"src bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
-        delx = 0.1
+        print(f"src bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}] at t={t}")
+        delx = cfg.get("visualization")["delx"]
+        print("delta x is slected as :", delx)
         xx = np.arange(xmin+delx, xmax, delx)
         if not np.isclose(xx[-1], np.round(xmax,2)):
             xx = np.append(xx, np.round(xmax,2))
@@ -324,7 +302,7 @@ def streamwise_logs(src, cfg, effective_vis_array):
             
             src_x = apply_slices(src, "X", loc=ix)
             (xmin,xmax,ymin,ymax,zmin,zmax) =_domain_bounds(src_x)
-            print(f"src_x bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
+            #print(f"src_x bounds : [{xmin},{xmax},{ymin},{ymax},{zmin},{zmax}]")
             integ = integrate_variables(src_x)
             dz = zmax - zmin
             res, measure, missing = fetch_integrals(integ, [effective_vis_array], depth=dz, return_average=True)
@@ -1606,6 +1584,9 @@ def vis_slice_boundary(src, cfg=None):
     outdir = (cfg or {}).get("output_directory", ".")
     cache_path = os.path.join(outdir, "boundary_cache.vtp")
 
+    # --- Get current source bounds for cache validation ---
+    src_bounds = _domain_bounds(src)
+
     # --- Try loading from cache ---
     fe_out = None
     if os.path.isfile(cache_path):
@@ -1617,6 +1598,15 @@ def vis_slice_boundary(src, cfg=None):
         if fe_out is None or fe_out.GetNumberOfPoints() == 0:
             print("[pvpython-child] Cache file empty/corrupt, recomputing boundary.")
             fe_out = None
+        elif fe_out is not None:
+            cache_bounds = fe_out.GetBounds()
+            tol = 1e-3
+            bounds_match = all(
+                abs(cache_bounds[i] - src_bounds[i]) < tol for i in range(6)
+            )
+            if not bounds_match:
+                print(f"[pvpython-child] Cache bounds {cache_bounds} != src bounds {src_bounds}, recomputing.")
+                fe_out = None
 
     # --- Compute from scratch if no cache ---
     if fe_out is None:

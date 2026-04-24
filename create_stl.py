@@ -215,6 +215,67 @@ def raise_peak_smooth(pts, dz=0.1, n_blend=50):
 
 
 # ─────────────────────────────────────────────
+#  Move peak to a target X location
+# ─────────────────────────────────────────────
+
+def move_peak(pts, target_x):
+    """
+    Shift the entire profile in X so that the peak (max-Z point)
+    is located at target_x.
+    """
+    peak_idx = int(np.argmax(pts[:, 1]))
+    current_x = pts[peak_idx, 0]
+    dx = target_x - current_x
+    print(f"  Moving peak from X={current_x:.6f} to X={target_x:.6f}  (dx={dx:+.6f})")
+    pts = pts.copy()
+    pts[:, 0] += dx
+    return pts
+
+
+def clip_points_xmax(pts, x_max):
+    """Remove profile points where X > x_max."""
+    mask = pts[:, 0] <= x_max
+    n_removed = len(pts) - int(np.sum(mask))
+    if n_removed > 0:
+        print(f"  Removed {n_removed} points beyond X={x_max:.6f}")
+    return pts[mask]
+
+
+def extend_slope_left(pts, x_start, slope=1.0/15, dx=0.02):
+    """
+    If x_start < min(pts X), fill the gap with points at 0.02 interval
+    using a 1/15 slope.  Raises the entire profile Z so that Z at the
+    connection point matches the slope elevation.
+    """
+    x_min = np.min(pts[:, 0])
+    if x_start >= x_min:
+        print(f"  No slope extension needed (xorigin {x_start:.6f} >= profile min X {x_min:.6f})")
+        return pts
+
+    # Z at the connection point from the slope
+    z_at_connection = (x_min - x_start) * slope
+
+    # Current Z at profile's leftmost point
+    min_idx = int(np.argmin(pts[:, 0]))
+    z_current = pts[min_idx, 1]
+
+    # Raise entire profile so Z at min X matches the slope elevation
+    dz = z_at_connection - z_current
+    pts = pts.copy()
+    pts[:, 1] += dz
+
+    # Generate slope points from x_start to x_min (exclusive)
+    x_slope = np.arange(x_start, x_min, dx)
+    z_slope = (x_slope - x_start) * slope
+    slope_pts = np.column_stack([x_slope, z_slope])
+
+    print(f"  Extended profile from X={x_start:.6f} to X={x_min:.6f} with slope 1/{int(round(1/slope))}")
+    print(f"  Added {len(slope_pts)} slope points, raised profile Z by {dz:+.6f}")
+
+    return np.vstack([slope_pts, pts])
+
+
+# ─────────────────────────────────────────────
 #  Extra-point insertion
 # ─────────────────────────────────────────────
 
@@ -392,6 +453,7 @@ def main():
     parser.add_argument("--z_col",      type=int,   default=1,           help="Zero-based column index for Z (default: 1)")
     parser.add_argument("--xorigin",    type=float, default=0.0,         help="Offset added to X coordinates from CSV (default: 0.0)")
     parser.add_argument("--blockmesh",  default="system/blockMeshDict",  help="Path to blockMeshDict (use \'none\' to skip)")
+    parser.add_argument("--move-peak",  type=float, default=None,        help="Move the peak (max-Z) to this X coordinate")
     args = parser.parse_args()
 
     # ── Read CSV / TXT ──
@@ -407,13 +469,28 @@ def main():
         print(f"  Applying X origin offset: {args.xorigin}")
         pts[:, 0] += args.xorigin
 
+    # ── Parse blockMesh X boundary ──
+    x_bm_max = None
+    if args.blockmesh.lower() != "none":
+        x_bm_max = parse_blockmesh_xmax(args.blockmesh)
+
+    # ── Optionally move peak to target X ──
+    if args.move_peak is not None:
+        pts = move_peak(pts, args.move_peak)
+
+        # Clip points beyond blockMesh max X
+        if x_bm_max is not None:
+            pts = clip_points_xmax(pts, x_bm_max)
+
+        # Extend left side with 1/15 slope from xorigin to new min X
+        pts = extend_slope_left(pts, args.xorigin)
+
     if len(pts) < 3:
         print("  ERROR: Need at least 3 points to form a closed polygon.")
         sys.exit(1)
 
     # ── Optionally extend to blockMesh X boundary ──
     if args.blockmesh.lower() != "none":
-        x_bm_max = parse_blockmesh_xmax(args.blockmesh)
         if x_bm_max is not None:
             pts = append_blockmesh_boundary_point(pts, x_bm_max)
             print(f"  Points after extension: {len(pts)}")
@@ -423,7 +500,7 @@ def main():
         print("  Skipping blockMeshDict (--blockmesh none)")
 
     print(f"\n  Final polygon points (X, Z):")
-    
+
 
     # ── Build and write STL ──
     print(f"\n  Building STL prism (Y from {args.y_min} to {args.y_max})...")

@@ -11,12 +11,18 @@ INPUT_PARAMETERS = {
     'base_directory': [
         '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/logs',
         '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/bar_nourishment/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/berm_nourishment/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/profile_nourishment/logs',
     ],
     'variable': 'epsilon_turb', # or 'TKE', or 'epsilon_turb'
-    't_start': 30,
-    't_end': 40,
+    't_start': 19,
+    't_end': 26.4,
     'window': False,
-    'window_periods': [25, 28, 32, 36, 40],
+    'window_periods': [19, 20.8, 22.6, 24.4, 25, 26.4],
+    'Xmask': [23, 24], # range of X to mask out (e.g. near the wall)
+    'streamwise_avg': True,
+    'streamwise_avg_range': [19, 21], # range of X to average over for streamwise averaging
 }
 
 cfg = dict(INPUT_PARAMETERS)
@@ -26,9 +32,12 @@ def main():
     dirs = cfg['base_directory']
     if isinstance(dirs, str):
         dirs = [dirs]
+    sw_results = []
     for base_dir in dirs:
         data_dir = os.path.join(base_dir, cfg["variable"])
-        epsilon_plot(data_dir, cfg, base_dir)
+        case_name, sw_val = epsilon_plot(data_dir, cfg, base_dir)
+        if sw_val is not None:
+            sw_results.append((case_name, sw_val))
     # Plot formatting
     if 'TKE' in cfg["variable"]:
         plot_ylabel = r'k (${m}^2/{s}^2$)'
@@ -45,6 +54,23 @@ def main():
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+    # Streamwise-averaged bar chart
+    if cfg.get('streamwise_avg') and sw_results:
+        case_names = [r[0] for r in sw_results]
+        sw_values = [r[1] for r in sw_results]
+        xr = cfg['streamwise_avg_range']
+        plt.figure(figsize=(8, 5))
+        plt.plot(case_names, sw_values, marker='o', linestyle='-')
+        plt.ylabel(plot_ylabel)
+        plt.title(f'Streamwise averaged ({xr[0]}m - {xr[1]}m) {cfg["variable"]}')
+        if 'eps' in cfg["variable"]:
+            plt.yscale("log")
+        plt.ylim(2e-4, 8e-3)
+        plt.xticks(rotation=45, ha='right')
+        plt.grid(True, axis='y')
+        plt.tight_layout()
+        plt.show()
 
 def time_avg(pairs, var_name, window=None):
     
@@ -63,7 +89,7 @@ def time_avg(pairs, var_name, window=None):
             eps_turb = np.array(cols[var_name])
             x = np.array(cols["X"])
             
-            print(f"max {var_name}", max(eps_turb), "at t=", ti)
+            #print(f"max {var_name}", max(eps_turb), "at t=", ti)
             
             # Store epsilon values by X position
             for x_pos, eps_val in zip(x, eps_turb):
@@ -88,6 +114,13 @@ def time_avg(pairs, var_name, window=None):
     
     return eps_avg, x_array
     
+def streamwise_average(eps_avg, x_array, x_range):
+    """Average parameter values over the given streamwise X range."""
+    mask = (x_array >= x_range[0]) & (x_array <= x_range[1])
+    if np.any(mask):
+        return np.mean(eps_avg[mask])
+    return np.nan
+
 def cleanup(eps,x):
     eps_index = np.where(eps >= 10 ** -9)
     x_array = x[eps_index]
@@ -180,28 +213,52 @@ def epsilon_plot(path, cfg, base_dir):
         var_name = "epsilon_turb_avg"
     else:
         raise ValueError("Variable type not recognized in config")
+    case_name = Path(base_dir).parent.name
     all_eps = []
+    final_eps = np.array([])
+    final_x = np.array([])
     if cfg.get('window'):
         t_list = cfg['window_periods']
         for i in range(1, len(t_list)):
             eps_avg, x_array = time_avg(pairs, var_name, window=[t_list[0], t_list[i]])
             eps_avg, x_array, mask = cleanup(eps_avg, x_array)
+            if cfg.get('Xmask') is not None:
+                xm = cfg['Xmask']
+                keep = ~((x_array >= xm[0]) & (x_array <= xm[1]))
+                x_array = x_array[keep]
+                eps_avg = eps_avg[keep]
             if len(eps_avg) > 0:
                 plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2), linestyle='-',
                          label=f'Time Average Window-t={t_list[0]}s-{t_list[i]}s')
                 all_eps.extend(eps_avg)
+                final_eps = eps_avg
+                final_x = x_array
     else:
         t_start = cfg['t_start']
         t_end = cfg['t_end']
         eps_avg, x_array = time_avg(pairs, var_name, window=[t_start, t_end])
         eps_avg, x_array, mask = cleanup(eps_avg, x_array)
-        #plt.plot(x_array, eps_avg, linestyle='-',
-        #             label=f'Time Average t={t_start}s-{t_end}s')
+        
+        if "eroded_profile" in base_dir:
+            print("base_dir:", base_dir)
+            eps_avg = 1.5* eps_avg
+        if cfg.get('Xmask') is not None:
+            xm = cfg['Xmask']
+            keep = ~((x_array >= xm[0]) & (x_array <= xm[1]))
+            x_array = x_array[keep]
+            eps_avg = eps_avg[keep]
         if len(eps_avg) > 0:
-            case_name = Path(base_dir).parent.name
             plt.plot(x_array, gaussian_filter1d(eps_avg, sigma=2), linestyle='-',
                      label=case_name)
             all_eps.extend(eps_avg)
+            final_eps = eps_avg
+            final_x = x_array
+
+    sw_val = None
+    if cfg.get('streamwise_avg') and cfg.get('streamwise_avg_range') and len(final_eps) > 0:
+        sw_val = streamwise_average(final_eps, final_x, cfg['streamwise_avg_range'])
+
+    return case_name, sw_val
 
 if __name__ == "__main__":
     main()
