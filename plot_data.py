@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 
 import os
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 import re
 from pathlib import Path
 from scipy.ndimage import gaussian_filter1d
 
+
+def _sci_label(t):
+    exp = int(math.floor(math.log10(abs(t))))
+    mant = t / 10 ** exp
+    if abs(mant - round(mant)) < 1e-9:
+        mant = int(round(mant))
+    if mant == 1:
+        return rf"$10^{{{exp}}}$"
+    return rf"${mant}\times10^{{{exp}}}$"
+
 INPUT_PARAMETERS = {
     'base_directory': [
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/no_reflection/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/no_reflection/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/bar_nourishment/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/berm_nourishment/no_reflection/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/profile_nourishment/no_reflection/logs',
+        '/Users/abhishekmukherjee/Library/CloudStorage/GoogleDrive-am2455@njit.edu/Other computers/My MacBook Pro/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/no_reflection/logs',
+        '/Users/abhishekmukherjee/Library/CloudStorage/GoogleDrive-am2455@njit.edu/Other computers/My MacBook Pro/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/no_reflection/logs',
+        '/Users/abhishekmukherjee/Library/CloudStorage/GoogleDrive-am2455@njit.edu/Other computers/My MacBook Pro/free_surface_2025/wave_tank/exp_beach_profile/bar_nourishment/no_reflection/logs',
+        '/Users/abhishekmukherjee/Library/CloudStorage/GoogleDrive-am2455@njit.edu/Other computers/My MacBook Pro/free_surface_2025/wave_tank/exp_beach_profile/berm_nourishment/no_reflection/logs',
+        '/Users/abhishekmukherjee/Library/CloudStorage/GoogleDrive-am2455@njit.edu/Other computers/My MacBook Pro/free_surface_2025/wave_tank/exp_beach_profile/profile_nourishment/no_reflection/logs',
     ],
     'variable': 'TKE_epsilon_turb_epsilon', # or 'TKE', or 'epsilon_turb'
     'output_parameters': ['TKE_avg', 'epsilon_turb_avg', 'epsilon_avg'], # columns (besides X) to read from .dat
@@ -23,6 +34,7 @@ INPUT_PARAMETERS = {
     'window_periods': [19, 20.8, 22.6, 24.4, 25, 26.4],
     'Xmask': None, #[23, 24], # range of X to mask out (e.g. near the wall)
     'streamwise_avg': True,
+    'stream True,
     'streamwise_avg_range': [19, 24], # range of X to average over for streamwise averaging
 }
 
@@ -31,8 +43,11 @@ cfg = dict(INPUT_PARAMETERS)
 def _plot_labels(var_name):
     if 'TKE' in var_name:
         return r'k (${m}^2/{s}^2$)', 'Spatial distribution of time averaged and depth averaged turbulent kinetic energy'
-    if 'eps' in var_name:
+    if 'epsilon_turb_avg' in var_name:
         return r'$\epsilon$ (${m}^2/{s}^3$)', 'Spatial distribution of time averaged and depth averaged turbulent dissipation rate'
+    if 'epsilon_avg' in var_name:
+        return r'$\epsilon$ (${m}^2/{s}^3$)', 'Spatial distribution of time averaged and depth averaged dissipation rate'
+
     return var_name, var_name
 
 def main():
@@ -46,12 +61,17 @@ def main():
     for var_name in output_params:
         plt.figure(figsize=(8, 5))
         sw_results = []
+        sw_int_results = []
         for base_dir in dirs:
             data_dir = os.path.join(base_dir, cfg["variable"])
-            case_name, sw_val = epsilon_plot(data_dir, cfg, base_dir, var_name)
+            case_name, sw_val, sw_int_val = epsilon_plot(data_dir, cfg, base_dir, var_name)
+
             if sw_val is not None:
                 sw_results.append((case_name, sw_val))
-
+            if sw_int_val is not None:
+                sw_int_results.append((case_name, sw_int_val))
+        print("sw_val", sw_results)
+        print("sw_int", sw_int_results)
         plot_ylabel, plot_title = _plot_labels(var_name)
         plt.xlabel('X (m)')
         plt.ylabel(plot_ylabel)
@@ -74,7 +94,32 @@ def main():
             plt.title(f'Streamwise averaged ({xr[0]}m - {xr[1]}m) {var_name}')
             if 'eps' in var_name:
                 plt.yscale("log")
-                plt.ylim(2e-4, 8e-3)
+                if 'epsilon_turb' in var_name:
+                    plt.ylim(2e-3, 8e-3)
+                else:
+                    plt.ylim(2e-4, 5e-3)
+                    ax = plt.gca()
+                    eps_ticks = [2e-4, 5e-4, 1e-3, 2e-3, 4e-3, 5e-3]
+                    ax.set_yticks(eps_ticks)
+                    ax.set_yticklabels([_sci_label(t) for t in eps_ticks])
+                    ax.yaxis.set_minor_locator(plt.NullLocator())
+
+            plt.xticks(rotation=45, ha='right')
+            plt.grid(True, axis='y')
+            plt.tight_layout()
+            plt.show()
+
+        # Streamwise-integrated bar chart for this parameter (per-case x range)
+        if cfg.get('streamwise_int') and sw_int_results:
+            case_names = [r[0] for r in sw_int_results]
+            sw_int_values = [r[1] for r in sw_int_results]
+            plt.figure(figsize=(8, 5))
+            plt.plot(case_names, sw_int_values, marker='o', linestyle='-')
+            int_ylabel, _ = _plot_labels(var_name)
+            plt.ylabel(rf'$\int$ {int_ylabel} dX')
+            plt.title(f'Streamwise integral of {var_name}')
+            if 'eps' in var_name:
+                plt.yscale("log")
             plt.xticks(rotation=45, ha='right')
             plt.grid(True, axis='y')
             plt.tight_layout()
@@ -128,6 +173,17 @@ def streamwise_average(eps_avg, x_array, x_range):
     if np.any(mask):
         return np.mean(eps_avg[mask])
     return np.nan
+
+def streamwise_integrate(eps_avg, x_array, x_range=None):
+    """Trapezoidal integral over X. If x_range is None, use the case's full available X extent."""
+    if x_range is not None:
+        mask = (x_array >= x_range[0]) & (x_array <= x_range[1])
+        x_array = x_array[mask]
+        eps_avg = eps_avg[mask]
+    if len(x_array) < 2:
+        return np.nan
+    order = np.argsort(x_array)
+    return float(np.trapz(eps_avg[order], x_array[order]))
 
 def cleanup(eps,x):
     eps_index = np.where(eps >= 10 ** -9)
@@ -224,7 +280,7 @@ def epsilon_plot(path, cfg, base_dir, var_name):
     if not pairs:
         raise FileNotFoundError("No matching .dat files found.")
 
-    case_name = Path(base_dir).parent.name
+    case_name = Path(base_dir).parent.parent.name
     all_eps = []
     final_eps = np.array([])
     final_x = np.array([])
@@ -266,7 +322,12 @@ def epsilon_plot(path, cfg, base_dir, var_name):
     if cfg.get('streamwise_avg') and cfg.get('streamwise_avg_range') and len(final_eps) > 0:
         sw_val = streamwise_average(final_eps, final_x, cfg['streamwise_avg_range'])
 
-    return case_name, sw_val
+    sw_int_val = None
+    if cfg.get('streamwise_int') and len(final_eps) > 0:
+        sw_int_val = streamwise_integrate(final_eps, final_x, x_range=None)
+        print(f"[streamwise_int] {case_name} {var_name}: integral={sw_int_val:.6g} over X=[{final_x.min():.3f},{final_x.max():.3f}]")
+
+    return case_name, sw_val, sw_int_val
 
 if __name__ == "__main__":
     main()

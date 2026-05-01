@@ -157,64 +157,6 @@ def parse_blockmesh_xmax(blockmesh_path):
 
 
 # ─────────────────────────────────────────────
-#  Peak raising with smooth blending
-# ─────────────────────────────────────────────
-
-def raise_peak_smooth(pts, dz=0.1, n_blend=50):
-    """
-    Raise the peak (max-Z point) by dz and smoothly *scale* the triangle
-    sides so the shape is preserved — just taller.
-
-    For each side (left / right of peak):
-      - The base_z is the Z value at the n_blend-th neighbour (unchanged).
-      - Every point between base and peak is vertically scaled so that
-        the peak reaches (peak_z + dz) while the base stays fixed.
-    """
-    pts = pts.copy()
-    peak_idx = int(np.argmax(pts[:, 1]))
-    peak_x = pts[peak_idx, 0]
-    peak_z = pts[peak_idx, 1]
-
-    # Split into left-of-peak and right-of-peak by X coordinate
-    left_mask = pts[:, 0] < peak_x - 1e-12
-    right_mask = pts[:, 0] > peak_x + 1e-12
-
-    # Left side: sort by X descending (closest to peak first)
-    left_indices = np.where(left_mask)[0]
-    left_sorted = left_indices[np.argsort(-pts[left_indices, 0])]
-    left_blend = left_sorted[:n_blend]
-
-    # Right side: sort by X ascending (closest to peak first)
-    right_indices = np.where(right_mask)[0]
-    right_sorted = right_indices[np.argsort(pts[right_indices, 0])]
-    right_blend = right_sorted[:n_blend]
-
-    def _scale_side(indices):
-        if len(indices) == 0:
-            return
-        # base_z = Z at the outermost blend point (stays unchanged)
-        base_z = pts[indices[-1], 1]
-        h_peak = peak_z - base_z
-        if h_peak < 1e-12:
-            return
-        # scale factor to stretch from base_z to (peak_z + dz)
-        scale = (peak_z + dz - base_z) / h_peak
-        for idx in indices:
-            h = pts[idx, 1] - base_z
-            pts[idx, 1] = base_z + h * scale
-
-    _scale_side(left_blend)
-    _scale_side(right_blend)
-
-    # Raise the peak itself
-    pts[peak_idx, 1] = peak_z + dz
-
-    print(f"  Raised peak at index {peak_idx} (X={peak_x:.3f}) by {dz}, "
-          f"scaled {len(left_blend)} left + {len(right_blend)} right neighbours")
-    return pts
-
-
-# ─────────────────────────────────────────────
 #  Move peak to a target X location
 # ─────────────────────────────────────────────
 
@@ -233,19 +175,22 @@ def move_peak(pts, target_x):
 
 
 def clip_points_xmax(pts, x_max):
-    """Remove profile points where X > x_max."""
-    mask = pts[:, 0] <= x_max
+    """Remove profile points where X >= x_max."""
+    mask = pts[:, 0] < x_max
     n_removed = len(pts) - int(np.sum(mask))
     if n_removed > 0:
         print(f"  Removed {n_removed} points beyond X={x_max:.6f}")
     return pts[mask]
 
 
-def extend_slope_left(pts, x_start, slope=1.0/15, dx=0.02):
+def extend_slope_left(pts, x_start, slope=1.0/15):
     """
-    If x_start < min(pts X), fill the gap with points at 0.02 interval
-    using a 1/15 slope.  Raises the entire profile Z so that Z at the
-    connection point matches the slope elevation.
+    If x_start < min(pts X), raise the entire profile Z so that Z at
+    the leftmost point matches the 1/15 slope elevation from x_start.
+
+    The slope itself becomes a single polygon edge from (x_start, 0)
+    to the first profile point — no intermediate collinear points are
+    added (they would break the ear-clipping triangulation).
     """
     x_min = np.min(pts[:, 0])
     if x_start >= x_min:
@@ -260,26 +205,28 @@ def extend_slope_left(pts, x_start, slope=1.0/15, dx=0.02):
     z_current = pts[min_idx, 1]
 
     # Raise entire profile so Z at min X matches the slope elevation
+    # Only raise, never lower — if the profile is already above the slope,
+    # keep it as-is to preserve the bar/bump height
     dz = z_at_connection - z_current
+    if dz < 0:
+        print(f"  Slope from X={x_start:.6f} to X={x_min:.6f} (1/{int(round(1/slope))} slope)")
+        print(f"  Z at connection = {z_at_connection:.6f}, profile Z at x_min = {z_current:.6f}")
+        print(f"  Profile already above slope — no Z adjustment needed")
+        return pts
     pts = pts.copy()
     pts[:, 1] += dz
 
-    # Generate slope points from x_start to x_min (exclusive)
-    x_slope = np.arange(x_start, x_min, dx)
-    z_slope = (x_slope - x_start) * slope
-    slope_pts = np.column_stack([x_slope, z_slope])
+    print(f"  Slope from X={x_start:.6f} to X={x_min:.6f} (1/{int(round(1/slope))} slope)")
+    print(f"  Z at connection = {z_at_connection:.6f}, profile Z raised by {dz:+.6f}")
 
-    print(f"  Extended profile from X={x_start:.6f} to X={x_min:.6f} with slope 1/{int(round(1/slope))}")
-    print(f"  Added {len(slope_pts)} slope points, raised profile Z by {dz:+.6f}")
-
-    return np.vstack([slope_pts, pts])
+    return pts
 
 
 # ─────────────────────────────────────────────
 #  Extra-point insertion
 # ─────────────────────────────────────────────
 
-def append_blockmesh_boundary_point(pts, x_bm_max):
+def append_blockmesh_boundary_point(pts, x_bm_max, x_left=None):
     """
     1. Find the point(s) in pts where X == max(X in pts).
        Use the LAST such point (preserving the order of traversal).
@@ -287,13 +234,10 @@ def append_blockmesh_boundary_point(pts, x_bm_max):
     3. Append a new point (x_bm_max, z_xmax) at the end of pts.
 
     This extends the profile to reach the blockMesh right boundary.
+    x_left overrides x_csv_min for the bottom-left closure point.
     """
     x_csv_max = np.max(pts[:, 0])
-    x_csv_min = np.min(pts[:, 0])
-    z_csv_max = np.max(pts[:, 1])
-    pts = raise_peak_smooth(pts, dz=0.1, n_blend=100)
-    z_csv_max = np.max(pts[:, 1])
-    print(f" CSV Z range: {np.min(pts[:, 1])} to {z_csv_max}")
+    x_csv_min = x_left if x_left is not None else np.min(pts[:, 0])
     # All points at the CSV x_max (tolerance for floats)
     tol = 1e-10 * (abs(x_csv_max) + 1.0)
     mask = np.abs(pts[:, 0] - x_csv_max) < tol
@@ -475,6 +419,7 @@ def main():
         x_bm_max = parse_blockmesh_xmax(args.blockmesh)
 
     # ── Optionally move peak to target X ──
+    slope_applied = False
     if args.move_peak is not None:
         pts = move_peak(pts, args.move_peak)
 
@@ -482,8 +427,10 @@ def main():
         if x_bm_max is not None:
             pts = clip_points_xmax(pts, x_bm_max)
 
-        # Extend left side with 1/15 slope from xorigin to new min X
-        pts = extend_slope_left(pts, args.xorigin)
+        # Raise profile Z to match 1/15 slope from xorigin
+        if args.xorigin < np.min(pts[:, 0]):
+            pts = extend_slope_left(pts, args.xorigin)
+            slope_applied = True
 
     if len(pts) < 3:
         print("  ERROR: Need at least 3 points to form a closed polygon.")
@@ -492,7 +439,8 @@ def main():
     # ── Optionally extend to blockMesh X boundary ──
     if args.blockmesh.lower() != "none":
         if x_bm_max is not None:
-            pts = append_blockmesh_boundary_point(pts, x_bm_max)
+            x_left = args.xorigin if slope_applied else None
+            pts = append_blockmesh_boundary_point(pts, x_bm_max, x_left=x_left)
             print(f"  Points after extension: {len(pts)}")
         else:
             print("  Skipping extra-point insertion (blockMeshDict parse failed).")
