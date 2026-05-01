@@ -9,82 +9,90 @@ from scipy.ndimage import gaussian_filter1d
 
 INPUT_PARAMETERS = {
     'base_directory': [
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/eroded_profile/no_reflection/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/initial_profile/no_reflection/logs',
         '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/bar_nourishment/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/berm_nourishment/logs',
-        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/profile_nourishment/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/berm_nourishment/no_reflection/logs',
+        '/Users/abhishek/work/free_surface_2025/wave_tank/exp_beach_profile/profile_nourishment/no_reflection/logs',
     ],
-    'variable': 'epsilon_turb', # or 'TKE', or 'epsilon_turb'
-    't_start': 19,
-    't_end': 26.4,
+    'variable': 'TKE_epsilon_turb_epsilon', # or 'TKE', or 'epsilon_turb'
+    'output_parameters': ['TKE_avg', 'epsilon_turb_avg', 'epsilon_avg'], # columns (besides X) to read from .dat
+    't_start': 18.5,
+    't_end': 28,
     'window': False,
     'window_periods': [19, 20.8, 22.6, 24.4, 25, 26.4],
-    'Xmask': [23, 24], # range of X to mask out (e.g. near the wall)
+    'Xmask': None, #[23, 24], # range of X to mask out (e.g. near the wall)
     'streamwise_avg': True,
-    'streamwise_avg_range': [19, 21], # range of X to average over for streamwise averaging
+    'streamwise_avg_range': [19, 24], # range of X to average over for streamwise averaging
 }
 
 cfg = dict(INPUT_PARAMETERS)
 
+def _plot_labels(var_name):
+    if 'TKE' in var_name:
+        return r'k (${m}^2/{s}^2$)', 'Spatial distribution of time averaged and depth averaged turbulent kinetic energy'
+    if 'eps' in var_name:
+        return r'$\epsilon$ (${m}^2/{s}^3$)', 'Spatial distribution of time averaged and depth averaged turbulent dissipation rate'
+    return var_name, var_name
+
 def main():
-    plt.figure(figsize=(8, 5))
     dirs = cfg['base_directory']
     if isinstance(dirs, str):
         dirs = [dirs]
-    sw_results = []
-    for base_dir in dirs:
-        data_dir = os.path.join(base_dir, cfg["variable"])
-        case_name, sw_val = epsilon_plot(data_dir, cfg, base_dir)
-        if sw_val is not None:
-            sw_results.append((case_name, sw_val))
-    # Plot formatting
-    if 'TKE' in cfg["variable"]:
-        plot_ylabel = r'k (${m}^2/{s}^2$)'
-        plot_title = 'Spatial distribution of time averaged and depth averaged turbulent kinetic energy'
-    elif 'eps' in cfg["variable"]:
-        plot_ylabel = r'$\epsilon$ (${m}^2/{s}^3$)'
-        plot_title = 'Spatial distribution of time averaged and depth averaged turbulent dissipation rate'
-    plt.xlabel('X (m)')
-    plt.ylabel(plot_ylabel)
-    plt.title(plot_title)
-    if 'eps' in cfg["variable"]:
-        plt.yscale("log")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    output_params = cfg.get('output_parameters') or []
+    if not output_params:
+        raise ValueError("No 'output_parameters' set in INPUT_PARAMETERS")
 
-    # Streamwise-averaged bar chart
-    if cfg.get('streamwise_avg') and sw_results:
-        case_names = [r[0] for r in sw_results]
-        sw_values = [r[1] for r in sw_results]
-        xr = cfg['streamwise_avg_range']
+    for var_name in output_params:
         plt.figure(figsize=(8, 5))
-        plt.plot(case_names, sw_values, marker='o', linestyle='-')
+        sw_results = []
+        for base_dir in dirs:
+            data_dir = os.path.join(base_dir, cfg["variable"])
+            case_name, sw_val = epsilon_plot(data_dir, cfg, base_dir, var_name)
+            if sw_val is not None:
+                sw_results.append((case_name, sw_val))
+
+        plot_ylabel, plot_title = _plot_labels(var_name)
+        plt.xlabel('X (m)')
         plt.ylabel(plot_ylabel)
-        plt.title(f'Streamwise averaged ({xr[0]}m - {xr[1]}m) {cfg["variable"]}')
-        if 'eps' in cfg["variable"]:
+        plt.title(plot_title)
+        if 'eps' in var_name:
             plt.yscale("log")
-        plt.ylim(2e-4, 8e-3)
-        plt.xticks(rotation=45, ha='right')
-        plt.grid(True, axis='y')
+        plt.legend()
+        plt.grid(True)
         plt.tight_layout()
         plt.show()
 
-def time_avg(pairs, var_name, window=None):
-    
+        # Streamwise-averaged bar chart for this parameter
+        if cfg.get('streamwise_avg') and sw_results:
+            case_names = [r[0] for r in sw_results]
+            sw_values = [r[1] for r in sw_results]
+            xr = cfg['streamwise_avg_range']
+            plt.figure(figsize=(8, 5))
+            plt.plot(case_names, sw_values, marker='o', linestyle='-')
+            plt.ylabel(plot_ylabel)
+            plt.title(f'Streamwise averaged ({xr[0]}m - {xr[1]}m) {var_name}')
+            if 'eps' in var_name:
+                plt.yscale("log")
+                plt.ylim(2e-4, 8e-3)
+            plt.xticks(rotation=45, ha='right')
+            plt.grid(True, axis='y')
+            plt.tight_layout()
+            plt.show()
+
+def time_avg(pairs, var_name, window=None, output_params=None):
+
     if window is not None:
         tmin, tmax = window[0], window[1]
     else:
         tmin, tmax = pairs[0][0], pairs[-1][0]
     # Collect all data with X positions
     data_dict = {}  # dict of {x_position: [eps_values_at_different_times]}
-    
+
     for ti, p in pairs:
-        
+
         if ti >= tmin and ti <= tmax:
-            cols = load_cols(p)
+            cols = load_cols(p, output_params=output_params)
             
             eps_turb = np.array(cols[var_name])
             x = np.array(cols["X"])
@@ -129,10 +137,10 @@ def cleanup(eps,x):
     x_array = np.delete(x_array, mask)
     eps_avg = np.delete(eps_avg, mask)
     return eps_avg, x_array, mask
-def load_cols(path):
+def load_cols(path, output_params=None):
     # Load data, skipping comment lines
     data = np.loadtxt(path, comments='#')
-    
+
     # Read header from comment line
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -141,26 +149,36 @@ def load_cols(path):
                 break
         else:
             raise ValueError(f"No header found in {path}")
-    
+
     # Remove anything in parentheses (units)
     header_text = re.sub(r'\([^)]*\)', '', header_text)
-    
+
     # Split by whitespace and remove empty strings
     headers = [h for h in header_text.split() if h]
-    
+
     # Ensure data is 2D
     if data.ndim == 1:
         data = data.reshape(-1, 1)
-    
+
     # Verify column count matches
     if len(headers) != data.shape[1]:
         raise ValueError(f"Header has {len(headers)} columns {headers} but data has {data.shape[1]} columns in {path}")
-    
-    # Create dictionary
+
+    # First column is always X coords; remaining columns optionally filtered by output_params
+    if output_params is None:
+        selected = headers
+    else:
+        missing = [p for p in output_params if p not in headers[1:]]
+        if missing:
+            raise ValueError(f"output_parameters {missing} not in header {headers[1:]} of {path}")
+        selected = [headers[0]] + [h for h in headers[1:] if h in output_params]
+
+    # Create dictionary using original column index from headers
     cols = {}
-    for i, h in enumerate(headers):
+    for h in selected:
+        i = headers.index(h)
         cols[h] = data[:, i].tolist()
-    
+
     return cols
 def flux_plot():
     # Define the path and filename
@@ -189,30 +207,23 @@ def flux_plot():
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-def epsilon_plot(path, cfg, base_dir):
+def epsilon_plot(path, cfg, base_dir, var_name):
     folder = Path(path)
     pat = re.compile(r"_([0-9.]+)\.dat$")
-    
+    print("folder:", folder)
     pairs = []
     for p in folder.glob("*.dat"):
-        
+
         m = pat.search(p.name)
         if m:
             pairs.append((float(m.group(1)), p))
         else:
             print(f"Not matched: {p.name}")
     pairs.sort(key=lambda tp: tp[0])  # sort by time
-    
+
     if not pairs:
         raise FileNotFoundError("No matching .dat files found.")
-        
-    # Determine which variable to extract
-    if 'TKE' in cfg["variable"]:
-        var_name = "TKE_avg"
-    elif 'eps' in cfg["variable"]:
-        var_name = "epsilon_turb_avg"
-    else:
-        raise ValueError("Variable type not recognized in config")
+
     case_name = Path(base_dir).parent.name
     all_eps = []
     final_eps = np.array([])
@@ -220,7 +231,7 @@ def epsilon_plot(path, cfg, base_dir):
     if cfg.get('window'):
         t_list = cfg['window_periods']
         for i in range(1, len(t_list)):
-            eps_avg, x_array = time_avg(pairs, var_name, window=[t_list[0], t_list[i]])
+            eps_avg, x_array = time_avg(pairs, var_name, window=[t_list[0], t_list[i]], output_params=cfg.get('output_parameters'))
             eps_avg, x_array, mask = cleanup(eps_avg, x_array)
             if cfg.get('Xmask') is not None:
                 xm = cfg['Xmask']
@@ -236,12 +247,9 @@ def epsilon_plot(path, cfg, base_dir):
     else:
         t_start = cfg['t_start']
         t_end = cfg['t_end']
-        eps_avg, x_array = time_avg(pairs, var_name, window=[t_start, t_end])
+        eps_avg, x_array = time_avg(pairs, var_name, window=[t_start, t_end], output_params=cfg.get('output_parameters'))
         eps_avg, x_array, mask = cleanup(eps_avg, x_array)
         
-        if "eroded_profile" in base_dir:
-            print("base_dir:", base_dir)
-            eps_avg = 1.5* eps_avg
         if cfg.get('Xmask') is not None:
             xm = cfg['Xmask']
             keep = ~((x_array >= xm[0]) & (x_array <= xm[1]))
